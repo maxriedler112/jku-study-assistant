@@ -1,70 +1,55 @@
-from __future__ import annotations
+import os
 import json
-from pathlib import Path
-from typing import Dict, List
-import fitz  # PyMuPDF
+from pypdf import PdfReader
+# Wir importieren deine Logik aus den anderen Dateien im 'app' Ordner
 from chunking import chunk_text
 from embeddings import EmbeddingService
 
-# Konfiguration
-PDF_FILE = "1193_17_BS_Wirtschaftsinformatik.pdf"
-PDF_PATH = Path("data") / PDF_FILE
-OUTPUT_PATH = Path("data/chunks_with_embeddings.json")
-
-def extract_pages(pdf_path: Path) -> List[Dict]:
-    if not pdf_path.exists():
-        raise FileNotFoundError(f"PDF nicht gefunden: {pdf_path}")
-
-    doc = fitz.open(pdf_path)
-    pages = []
-    for page_num, page in enumerate(doc, start=1):
-        text = page.get_text("text", sort=True)
-        if text.strip():
-            pages.append({"page": page_num, "text": text})
-    return pages
-
-def build_chunks(pages: List[Dict], source_name: str) -> List[Dict]:
-    all_chunks = []
-    for page_data in pages:
-        page_chunks = chunk_text(page_data["text"], chunk_size=1000, overlap=200)
-        
-        for idx, chunk in enumerate(page_chunks):
-            all_chunks.append({
-                "content": chunk,  # 'content' ist der Standardname in pgvector Tutorials
-                "metadata": {
-                    "source": source_name,
-                    "page": page_data["page"],
-                    "chunk_index": idx
-                }
-            })
-    return all_chunks
-
-def main() -> None:
-    print(f"--- Starte Ingest für: {PDF_FILE} ---")
+def run_ingest():
+    # 1. Pfade festlegen (basierend auf deinem Screenshot)
+    pdf_path = "data/1193_17_BS_Wirtschaftsinformatik.pdf"
+    output_path = "data/chunks_with_embeddings.json"
     
-    # 1. Extraktion
-    pages = extract_pages(PDF_PATH)
+    if not os.path.exists(pdf_path):
+        print(f"❌ Fehler: Das PDF wurde unter {pdf_path} nicht gefunden!")
+        return
+
+    # 2. PDF Text extrahieren
+    print(f"📄 Extrahiere Text aus: {pdf_path}...")
+    reader = PdfReader(pdf_path)
+    full_text = ""
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            full_text += page_text + "\n"
+
+    # 3. Text in Chunks unterteilen
+    print("✂️ Erstelle Text-Abschnitte (Chunks)...")
+    chunks = chunk_text(full_text)
     
-    # 2. Chunking (Wir nutzen den Dateinamen als Source)
-    chunks = build_chunks(pages, source_name=PDF_FILE)
-    print(f"Erstellt: {len(chunks)} Chunks.")
+    # 4. Embeddings generieren
+    print(f"🧠 {len(chunks)} Chunks gefunden. Generiere 768-dimensionale Vektoren...")
+    embed_service = EmbeddingService()
+    embeddings = embed_service.embed_texts(chunks)
 
-    # 3. Embeddings
-    embedder = EmbeddingService()
-    texts = [c["content"] for c in chunks]
-    vectors = embedder.embed_texts(texts)
+    # 5. Daten für Supabase strukturieren
+    final_data = []
+    for i, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+        final_data.append({
+            "content": chunk,
+            "embedding": vector,
+            "metadata": {
+                "source": "1193_17_BS_Wirtschaftsinformatik.pdf",
+                "chunk_index": i
+            }
+        })
 
-    # Vektoren in die Struktur einfügen
-    for chunk, vector in zip(chunks, vectors):
-        chunk["embedding"] = vector
-
-    # 4. Speichern (Lokal als Backup/Test)
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_PATH.open("w", encoding="utf-8") as f:
-        json.dump(chunks, f, ensure_ascii=False, indent=2)
+    # 6. Speichern der fertigen Datei
+    os.makedirs("data", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(final_data, f, ensure_ascii=False, indent=4)
     
-    print(f"Erfolg! {len(chunks)} Vektoren lokal in {OUTPUT_PATH} gespeichert.")
-    print("\nNächster Schritt: Upload der JSON zu Supabase.")
+    print(f"✅ Erfolg! Die Datei {output_path} wurde erstellt.")
 
 if __name__ == "__main__":
-    main()
+    run_ingest()
