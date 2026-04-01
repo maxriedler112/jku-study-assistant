@@ -1,31 +1,44 @@
-🎓 JKU Study Assistant (RAG)
-Ein intelligenter Chatbot, der das JKU Wirtschaftsinformatik Curriculum "liest" und Fragen dazu präzise beantwortet. Schluss mit dem mühsamen Durchsuchen von 20-seitigen PDFs!
+# 🎓 JKU Study Assistant (RAG)
 
-🏗️ Funktionsweise (RAG Pipeline)
-Das System nutzt eine Retrieval-Augmented Generation (RAG) Architektur:
+Ein intelligenter Chatbot, der das **JKU Wirtschaftsinformatik Curriculum** "liest" und Fragen dazu präzise beantwortet.
+Schluss mit dem mühsamen Durchsuchen von 20-seitigen PDFs!
 
-Ingest: Das PDF wird extrahiert und in sinnvolle Abschnitte (Chunks) unterteilt.
+---
 
-Embed: Text wird via multilingual-e5-base in hochdimensionale Vektoren umgewandelt.
+## 🏗️ Funktionsweise (RAG Pipeline)
 
-Store: Diese Vektoren werden in einer Supabase (pgvector) Datenbank gespeichert.
+Das System nutzt eine **Retrieval-Augmented Generation (RAG)** Architektur:
 
-Chat: Bei einer Frage sucht das System die relevantesten Textstellen und lässt Llama 3.1 (Groq) eine präzise Antwort formulieren.
+1. **Ingest**
+   Das PDF wird extrahiert und in sinnvolle Abschnitte (**Chunks**) unterteilt.
 
-🛠️ Tech Stack
-Sprache: Python 3.11+
+2. **Embed**
+   Text wird via `multilingual-e5-base` in hochdimensionale Vektoren umgewandelt.
 
-KI-Modell: Llama 3.1 (via Groq API)
+3. **Store**
+   Diese Vektoren werden in einer **Supabase (pgvector)** Datenbank gespeichert.
 
-Embeddings: intfloat/multilingual-e5-base
+4. **Chat**
+   Bei einer Frage sucht das System die relevantesten Textstellen und lässt
+   **Llama 3.1 (Groq)** eine präzise Antwort formulieren.
 
-Vektor-DB: Supabase (PostgreSQL + pgvector)
+---
 
-Frontend: Streamlit
+## 🛠️ Tech Stack
 
-🚀 Quickstart für Team-Mitglieder
-1. Setup & Installation
-Bash
+* **Sprache:** Python 3.11+
+* **KI-Modell:** Llama 3.1 (via Groq API)
+* **Embeddings:** `intfloat/multilingual-e5-base`
+* **Vektor-DB:** Supabase (PostgreSQL + pgvector)
+* **Frontend:** Streamlit
+
+---
+
+## 🚀 Quickstart für Team-Mitglieder
+
+### 1. Setup & Installation
+
+```bash
 # 1. Repo klonen & Ordner betreten
 git clone <repo-url>
 cd jku-study-assistant
@@ -38,44 +51,91 @@ python -m venv .venv
 
 # 4. Dependencies installieren
 pip install -r requirements.txt
-2. Environment Variables (.env)
-Erstelle eine Datei namens .env im Hauptverzeichnis. Wichtig: Diese Datei niemals auf GitHub pushen! Frag Alex nach den aktuellen Keys.
+```
 
-Code-Snippet
+---
+
+### 2. Environment Variables (.env)
+
+Erstelle eine Datei namens `.env` im Hauptverzeichnis.
+**Wichtig:** Diese Datei niemals auf GitHub pushen!
+
+Frag Max nach den aktuellen Keys.
+
+```env
 SUPABASE_URL=https://deine-projekt-id.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=dein-geheimer-key
 GROQ_API_KEY=dein-groq-api-key
-3. Datenbank-Setup (SQL)
-Damit die Suche funktioniert, muss im Supabase SQL Editor einmalig die Suchfunktion angelegt werden. Den Code findest du in scripts/setup.sql. (Achte darauf, dass der ID-Typ auf uuid eingestellt ist!)
+```
 
-▶️ Bedienung
-Schritt 1: Daten indizieren
+---
+
+### 3. Datenbank-Setup (SQL)
+
+Damit die Suche funktioniert, muss im Supabase SQL Editor einmalig die Suchfunktion angelegt werden.
+
+⚠️ Achte darauf, dass der ID-Typ auf `uuid` eingestellt ist!
+
+---
+
+## ▶️ Verwendung
+
+### Schritt 1: Daten indizieren
+
 Falls die Datenbank noch leer ist oder das PDF aktualisiert wurde:
 
-Bash
+```bash
 python app/ingest.py
 python app/upload.py
-Schritt 2: Den Assistant starten
-Wir empfehlen das Web-Interface für die beste User Experience:
+```
 
-Variante A: Web-Interface (Empfohlen)
+---
 
-Bash
+### Schritt 2: Den Assistant starten
+
+#### Variante A: Web-Interface (Empfohlen)
+
+```bash
 streamlit run app/main.py
-Variante B: Terminal (Nur für schnelle Tests)
+```
 
-Bash
+#### Variante B: Terminal (für schnelle Tests)
+
+```bash
 python app/assistant.py
-📁 Projektstruktur
-Datei	Beschreibung
-app/ingest.py	PDF-Verarbeitung & Chunking-Logik
-app/upload.py	Erstellung der Embeddings & Upload zu Supabase
-app/search.py	Kern-Logik der Vektorsuche (Retrieval)
-app/assistant.py	Prompt-Engineering & Groq-Schnittstelle
-app/main.py	Streamlit Frontend (UI)
-⚠️ Wichtige Regeln
-Sicherheit: Die .env Datei ist tabu für Git!
+```
 
-Umgebung: Arbeite immer mit aktivierter (.venv).
+---
 
-Versionierung: Wenn du neue Libraries installierst, aktualisiere die requirements.txt mit pip freeze > requirements.txt.
+## 📁 Projektstruktur
+
+| Datei              | Beschreibung                              |
+| ------------------ | ----------------------------------------- |
+| `app/ingest.py`    | PDF-Verarbeitung & Chunking-Logik         |
+| `app/upload.py`    | Embeddings erstellen & Upload zu Supabase |
+| `app/search.py`    | Vektorsuche (Retrieval-Logik)             |
+| `app/assistant.py` | Prompting & Groq-Schnittstelle            |
+| `app/main.py`      | Streamlit Frontend                        |
+
+---
+
+## ⚠️ Wichtige Regeln
+
+* 🔐 **Sicherheit:** Die `.env` Datei ist tabu für Git! (.gitignore .env einfügen)
+* 🧪 **Umgebung:** Arbeite immer mit aktivierter `.venv`
+* 📦 **Versionierung:**
+  Wenn du neue Libraries installierst:
+
+```bash
+pip freeze > requirements.txt
+```
+
+---
+
+## 💡 Tipps
+
+* Wenn Antworten komisch sind → prüfe deine Chunks (Ingest!)
+* Wenn nichts gefunden wird → check Embeddings + DB
+* Wenn UI spinnt → Streamlit neu starten 😉
+
+---
