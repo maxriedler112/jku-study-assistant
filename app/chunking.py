@@ -1,54 +1,68 @@
-from __future__ import annotations
-
+import re
 from typing import List
 
-
 def clean_text(text: str) -> str:
-    """Bereinigt grob den aus dem PDF extrahierten Text."""
     if not text:
         return ""
 
-    text = text.replace("\xa0", " ")
-    text = text.replace("\t", " ")
+    # A. Silbentrennung entfernen: "Lehrveranstal-\ntung" -> "Lehrveranstaltung"
+    # Sucht nach Bindestrich am Zeilenende gefolgt von einem Zeilenumbruch
+    text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
 
-    lines = [line.strip() for line in text.splitlines()]
-    cleaned_lines = [line for line in lines if line]
+    # B. Harte Zeilenumbrüche innerhalb von Sätzen fixen
+    # Wenn eine Zeile nicht mit einem Satzzeichen endet, gehört die nächste Zeile wahrscheinlich dazu
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for i in range(len(lines)):
+        line = lines[i].strip()
+        if not line:
+            continue
+            
+        cleaned_lines.append(line)
+        # Wenn die Zeile NICHT mit [. ! ? :] endet, fügen wir ein Leerzeichen statt Umbruch an
+        if not re.search(r'[.!?:0-9]$', line): 
+            cleaned_lines[-1] += " "
+        else:
+            cleaned_lines[-1] += "\n" # Echter Absatz
 
-    return "\n".join(cleaned_lines).strip()
+    text = "".join(cleaned_lines)
+    
+    # C. Mehrfache Leerzeichen säubern
+    text = re.sub(r"\s+", " ", text)
+    
+    return text.strip()
 
-
-def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
-    """
-    Zerlegt Text in überlappende Chunks auf Zeichenbasis.
-    """
-    if not text:
-        return []
-
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be > 0")
-    if overlap < 0:
-        raise ValueError("overlap must be >= 0")
-    if overlap >= chunk_size:
-        raise ValueError("overlap must be smaller than chunk_size")
-
+def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str]:
+    # Nutze einen Semantic-Split Ansatz: Trenne primär an Satzenden
     text = clean_text(text)
-    if not text:
-        return []
+    
+    # Regex-Split an Satzenden, aber behalte das Satzzeichen
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        # Falls ein einzelner Satz schon zu lang ist, hart schneiden (selten)
+        if len(sentence) > chunk_size:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            # Harter Schnitt für Überlänge
+            for i in range(0, len(sentence), chunk_size - overlap):
+                chunks.append(sentence[i:i + chunk_size].strip())
+            current_chunk = ""
+            continue
 
-    chunks: List[str] = []
-    start = 0
-    text_length = len(text)
-
-    while start < text_length:
-        end = min(start + chunk_size, text_length)
-        chunk = text[start:end].strip()
-
-        if chunk:
-            chunks.append(chunk)
-
-        if end >= text_length:
-            break
-
-        start = end - overlap
-
+        if len(current_chunk) + len(sentence) <= chunk_size:
+            current_chunk += sentence + " "
+        else:
+            chunks.append(current_chunk.strip())
+            # Overlap: Die letzten X Zeichen des alten Chunks mitnehmen
+            # Oder besser: Den letzten Satz mitnehmen für den Kontext
+            current_chunk = sentence + " "
+            
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+        
     return chunks
