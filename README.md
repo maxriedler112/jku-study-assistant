@@ -97,6 +97,7 @@ python app/upload.py
 
 ```bash
 streamlit run app/main.py
+beenden mit STRG + C
 ```
 
 #### Variante B: Terminal (für schnelle Tests)
