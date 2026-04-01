@@ -1,198 +1,77 @@
-# 🧠 JKU Study Assistant (RAG)
+🎓 JKU Study Assistant (RAG)
+Ein intelligenter Chatbot, der das JKU Wirtschaftsinformatik Curriculum "liest" und Fragen dazu präzise beantwortet.
 
-## 🎯 Projektziel
+🏗️ Funktionsweise (RAG Pipeline)
+Ingest: PDF wird in kleine Stücke (Chunks) geschnitten.
 
-Ziel dieses Projekts ist die Entwicklung eines Chatbots für JKU-Studierende, der Fragen zu:
+Embed: Text wird in Vektoren umgewandelt (E5-Multilingual Model).
 
-* Studienrichtungen
-* Curriculum
-* Kursen
+Store: Vektoren landen in der Supabase (pgvector) Datenbank.
 
-beantworten kann.
+Chat: User fragt → Datenbank sucht Kontext → Llama 3 (Groq) antwortet.
 
-👉 Aktueller Fokus: **WIN Curriculum (PDF)**
+🛠️ Tech Stack
+Sprache: Python 3.11+
 
----
+KI-Modell: Llama 3.1 (via Groq API)
 
-## 💡 Konzept (RAG)
+Embeddings: intfloat/multilingual-e5-base
 
-Das System basiert auf **Retrieval-Augmented Generation (RAG)**:
+Vektor-DB: Supabase (PostgreSQL)
 
-1. User stellt eine Frage in natürlicher Sprache
-2. System sucht relevante Inhalte im Curriculum
-3. LLM generiert eine Antwort basierend auf diesen Daten
+Frontend: Streamlit
 
-👉 Vorteil: weniger Halluzinationen, Antworten basieren auf echten Dokumenten
-
----
-
-## ⚙️ Tech Stack
-
-* **Backend:** Python (FastAPI – geplant)
-* **RAG Pipeline:**
-  PDF → Text → Chunks → Embeddings → Retrieval → LLM
-* **Datenbank:** Supabase (PostgreSQL + pgvector)
-* **Frontend:** Angular oder React (später)
-
----
-
-## 📁 Projektstruktur
-
-```
-jku-study-assistant/
-│
-├── app/
-│   ├── ingest.py        # Hauptpipeline (PDF → Embeddings)
-│   ├── chunking.py      # Text-Chunking
-│   └── embeddings.py    # Embedding-Generierung
-│
-├── data/
-│   └── curriculum.pdf   # Input-Dokument
-│
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
----
-
-## 🚀 Setup
-
-### 1. Projekt klonen
-
-```bash
+🚀 Quickstart (für Team-Mitglieder)
+1. Setup & Installation
+Bash
+# Repo klonen & Ordner betreten
 git clone <repo-url>
 cd jku-study-assistant
-```
 
-### 2. Virtuelle Umgebung erstellen
-
-```bash
+# venv erstellen & aktivieren (Windows)
 python -m venv .venv
-```
+.\.venv\Scripts\Activate.ps1
 
-### 3. venv aktivieren (Windows / PowerShell)
-
-```bash
-.venv\Scripts\Activate.ps1
-```
-
-Falls Fehler:
-
-```bash
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
----
-
-### 4. Dependencies installieren
-
-```bash
+# Dependencies installieren
 pip install -r requirements.txt
-```
+2. Environment Variables (.env)
+Erstelle eine Datei namens .env im Hauptverzeichnis. Frage Alex nach den Keys!
 
----
+Code-Snippet
+SUPABASE_URL=https://deine-url.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=dein-geheimer-key
+GROQ_API_KEY=dein-groq-api-key
+3. Datenbank-Funktion (Einmalig)
+Damit die Suche funktioniert, muss in der Supabase SQL-Konsole die Funktion match_documents angelegt sein (Code findest du in scripts/setup.sql oder frag Alex).
 
-## ▶️ Nutzung (Ingestion Pipeline)
+▶️ Bedienung
+Schritt 1: Daten indizieren (optional, falls DB leer)
+Liest das PDF ein und lädt es hoch:
 
-PDF einlesen + Chunking + Embeddings:
-
-```bash
+Bash
 python app/ingest.py
-```
+python app/upload.py
+Schritt 2: Den Assistant starten
+Variante A: Terminal (für Tests)
 
----
+Bash
+python app/assistant.py
+Variante B: Web-Interface (empfohlen)
 
-## 📦 Output
+Bash
+streamlit run app/main.py
+📁 Projektstruktur
+app/ingest.py: PDF-Processing & Chunking.
 
-Nach erfolgreichem Run:
+app/upload.py: Upload der Vektoren zu Supabase.
 
-```
-data/chunks_with_embeddings.json
-```
+app/search.py: Die Logik hinter der Vektorsuche.
 
-Enthält:
+app/assistant.py: Verbindung zur Groq-KI.
 
-* Text-Chunks
-* Metadaten (Seite, Index)
-* Embeddings (Vektoren)
+app/main.py: Das Streamlit Frontend.
 
----
+⚠️ Wichtige Regeln
+NIEMALS die .env Datei committen (ist in .gitignore).
 
-## 🧪 Aktueller Stand
-
-✅ PDF-Extraktion funktioniert
-✅ Chunking implementiert
-✅ Embeddings generiert
-⬜ Supabase Integration
-⬜ Retrieval / Search
-⬜ Chatbot
-
----
-
-## ⚠️ Wichtige Hinweise für Team
-
-### 1. Immer venv aktivieren
-
-Vor jedem Run:
-
-```bash
-.venv\Scripts\Activate.ps1
-```
-
----
-
-### 2. Nicht committen
-
-Diese Dinge dürfen NICHT gepusht werden:
-
-* `.venv/`
-* große generierte Dateien (z. B. JSON mit Embeddings)
-* `.env` Dateien
-
----
-
-### 3. Python-Version
-
-Empfohlen:
-
-* Python **3.11 oder 3.12**
-
-Aktuell:
-
-* 3.14 kann funktionieren, aber evtl. Probleme bei Libraries
-
----
-
-### 4. Pfade beachten
-
-* PDF muss in `data/` liegen
-* Dateiname muss mit `ingest.py` übereinstimmen
-
----
-
-### 5. Erste Fehlersuche
-
-Wenn etwas nicht funktioniert:
-
-* venv aktiv?
-* richtige Ordnerstruktur?
-* `pip install` ausgeführt?
-* Fehlermeldung genau lesen
-
----
-
-## 🔜 Nächste Schritte
-
-* Supabase + pgvector Integration
-* Similarity Search
-* FastAPI Endpoint
-* Chat Interface
-
----
-
-## 💬 Ziel
-
-Ein funktionierender Studien-Chatbot, der auf echten JKU-Daten basiert.
-
----
+venv muss immer aktiv sein beim Starten.
