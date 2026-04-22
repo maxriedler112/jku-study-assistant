@@ -3,21 +3,20 @@ import json
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# 1. Verbindung zur .env Datei herstellen
 load_dotenv()
 
-URL = os.getenv("SUPABASE_URL")
-KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+url = os.getenv("SUPABASE_URL")
+key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# 2. Supabase Client starten
-supabase: Client = create_client(URL, KEY)
+if not url or not key:
+    raise ValueError("SUPABASE_URL oder SUPABASE_SERVICE_ROLE_KEY fehlt in der .env Datei")
 
-def upload_data():
-    # Pfad zu deinen berechneten Chunks
-    file_path = "data/chunks_with_embeddings.json"
-    
+supabase: Client = create_client(url, key)
+
+
+def upload_data(file_path: str = "data/chunks_with_embeddings.json"):
     if not os.path.exists(file_path):
-        print("Fehler: Die Datei 'chunks_with_embeddings.json' wurde nicht gefunden!")
+        print(f"Fehler: '{file_path}' wurde nicht gefunden!")
         return
 
     with open(file_path, "r", encoding="utf-8") as f:
@@ -25,22 +24,24 @@ def upload_data():
 
     print(f"Starte Upload von {len(data)} Chunks...")
 
-    # Wir laden die Daten hoch
+    success = 0
+    errors  = 0
     for chunk in data:
-        # Wir passen die Struktur an deine Supabase-Tabelle an
         row = {
-            "content": chunk["content"],
-            "embedding": chunk["embedding"],
-            "metadata": chunk["metadata"]
+            "content":     chunk["content"],
+            "embedding":   chunk["embedding"],
+            "metadata":    chunk["metadata"],
+            "chunk_index": chunk["metadata"].get("chunk_index"),
         }
-        
         try:
-            supabase.table("documents").insert(row).execute()
+            supabase.table("chunks").insert(row).execute()
+            success += 1
         except Exception as e:
-            print(f"Fehler beim Hochladen eines Chunks: {e}")
-            break
+            print(f"  Fehler bei Chunk {chunk['metadata'].get('chunk_index')}: {e}")
+            errors += 1
 
-    print("✅ Alle Daten wurden erfolgreich zu Supabase hochgeladen!")
+    print(f"✅ {success} Chunks hochgeladen, {errors} Fehler.")
+
 
 if __name__ == "__main__":
     upload_data()
