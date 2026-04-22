@@ -1,7 +1,6 @@
 import os
 import json
-from pypdf import PdfReader
-# Wir importieren deine Logik aus den anderen Dateien im 'app' Ordner
+import pdfplumber
 from chunking import chunk_text
 from embeddings import EmbeddingService
 
@@ -9,18 +8,22 @@ def run_ingest():
     # 1. Pfade festlegen (basierend auf deinem Screenshot)
     pdf_path = "data/1193_17_BS_Wirtschaftsinformatik.pdf"
     output_path = "data/chunks_with_embeddings.json"
-    
+
     if not os.path.exists(pdf_path):
         print(f"❌ Fehler: Das PDF wurde unter {pdf_path} nicht gefunden!")
         return
 
     # 2. PDF Text extrahieren
     print(f"📄 Extrahiere Text aus: {pdf_path}...")
-    reader = PdfReader(pdf_path)
     full_text = ""
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if not page_text:
+                continue
+            # Inhaltsverzeichnis-Seiten überspringen (viele Leitpunkte)
+            if page_text.count(". .") > 8:
+                continue
             full_text += page_text + "\n"
 
     # 3. Text in Chunks unterteilen
