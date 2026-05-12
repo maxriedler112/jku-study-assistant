@@ -4,6 +4,9 @@ pipeline.py – Zentrale ETL-Pipeline des JKU Study Assistants.
 Ablauf:
   PDF-Bytes  →  Supabase Storage
              →  Seitenweise Text- & Tabellen-Extraktion (pdfplumber)
+                  • find_tables() liefert Bounding-Boxes → Tabellen werden
+                    inline an ihrer echten Position im Textfluss eingefügt
+                  • crop() extrahiert Text nur aus tabellenfreien Bereichen
              →  Chunking (chunking.py)
              →  Embeddings (embeddings.py / E5-Modell)
              →  Chunks + Metadaten in Supabase speichern
@@ -97,6 +100,85 @@ def extract_section_heading(text: str) -> Optional[str]:
     return None
 
 
+def extract_page_content(page) -> str:
+    """
+    Extrahiert Text und Tabellen einer PDF-Seite in der korrekten Leserichtung.
+
+    WARUM diese Funktion statt page.extract_text() + page.extract_tables():
+      Der alte Ansatz hängte Tabellen immer ans Ende des Seitentexts an –
+      unabhängig davon, wo die Tabelle im PDF tatsächlich steht. Das zerstört
+      den Sinnzusammenhang (z.B. Einleitungssatz vor der Tabelle landet in einem
+      anderen Chunk als die Tabelle selbst).
+
+    LÖSUNG mit find_tables() + crop():
+      1. find_tables() liefert Table-Objekte mit Bounding-Box (x0, top, x1, bottom)
+      2. Die Seite wird in vertikale Streifen aufgeteilt: Text-über-Tabelle,
+         Tabelle, Text-unter-Tabelle usw.
+      3. crop() schneidet exakt diese Streifen aus und extrahiert nur den Text
+         aus tabellenfreien Bereichen
+      4. Ergebnis: Text und Tabellen in der echten Leserichtung kombiniert
+
+    :param page: pdfplumber Page-Objekt
+    :returns:    Kombinierter String mit Text und Markdown-Tabellen in Leserichtung
+    """
+    # Tabellen-Objekte mit Positionsdaten finden
+    # find_tables() gibt Table-Objekte zurück, jedes hat .bbox = (x0, top, x1, bottom)
+    table_objects = page.find_tables()
+
+    if not table_objects:
+        # Keine Tabellen auf dieser Seite → einfache Textextraktion
+        return page.extract_text() or ""
+
+    # Nach vertikaler Position sortieren (von oben nach unten lesen)
+    sorted_tables = sorted(table_objects, key=lambda t: t.bbox[1])
+
+    regions = []   # Liste von ("text" | "table", Inhalt) in Leserichtung
+    prev_bottom = 0  # untere Kante des zuletzt verarbeiteten Bereichs
+
+    for table_obj in sorted_tables:
+        x0, top, x1, bottom = table_obj.bbox
+
+        # Koordinaten auf Seitengrenzen begrenzen (Schutz vor fehlerhaften PDF-Bbox-Daten)
+        top    = max(top, prev_bottom)
+        bottom = min(bottom, page.height)
+
+        # Textbereich ÜBER dieser Tabelle extrahieren
+        # crop() schneidet einen rechteckigen Bereich aus der Seite aus
+        if top > prev_bottom:
+            text_region = page.crop((0, prev_bottom, page.width, top))
+            text = text_region.extract_text()
+            if text and text.strip():
+                regions.append(("text", text))
+
+        # Tabellendaten extrahieren (.extract() gibt Liste von Zeilen zurück)
+        table_data = table_obj.extract()
+        if table_data:
+            regions.append(("table", table_data))
+
+        prev_bottom = bottom  # nächsten Textbereich ab hier starten
+
+    # Textbereich NACH der letzten Tabelle (bis zum Ende der Seite)
+    if prev_bottom < page.height:
+        text_region = page.crop((0, prev_bottom, page.width, page.height))
+        text = text_region.extract_text()
+        if text and text.strip():
+            regions.append(("text", text))
+
+    # Alle Regionen in Leserichtung zu einem String zusammenführen
+    parts = []
+    for kind, content in regions:
+        if kind == "text":
+            parts.append(content)
+        else:
+            # Tabelle in Markdown umwandeln (| Fach | ECTS | ...)
+            md = table_to_markdown(content)
+            if md:
+                parts.append(md)
+
+    # Leerzeichen-Trenner zwischen den Regionen für saubere Chunk-Grenzen
+    return "\n\n".join(filter(None, parts))
+
+
 # ── Datenbankoperationen ─────────────────────────────────────────────────────
 
 def get_or_create_study_program(code: str, name: str) -> str:
@@ -188,28 +270,26 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
 
-                # Rohtext der Seite extrahieren (None → leerer String)
-                page_text = page.extract_text() or ""
+                # Rohtext separat holen – nur für ToC-Check und Heading-Erkennung.
+                # Für den eigentlichen Inhalt nutzen wir extract_page_content(),
+                # das Text und Tabellen inline in Leserichtung kombiniert.
+                page_text_raw = page.extract_text() or ""
 
                 # Inhaltsverzeichnis-Seiten überspringen:
                 # viele ". ." Sequenzen = Leitpunkte im ToC
-                if page_text.count(". .") > 8:
+                if page_text_raw.count(". .") > 8:
                     continue
 
-                # Tabellen extrahieren und als Markdown-Strings aufbereiten
-                tables = page.extract_tables() or []
-                table_blocks = [table_to_markdown(t) for t in tables if t]
-
-                # Text und Tabellen zu einem kombinierten Seiteninhalt zusammenführen
-                combined = page_text
-                if table_blocks:
-                    combined += "\n\n" + "\n\n".join(table_blocks)
+                # Text + Tabellen inline in der richtigen Leserichtung extrahieren.
+                # Tabellen stehen jetzt AN DER STELLE wo sie im PDF stehen,
+                # nicht mehr pauschal am Ende des Seitentexts.
+                combined = extract_page_content(page)
 
                 if not combined.strip():
                     continue   # leere Seite überspringen
 
-                # Überschrift der Seite erkennen (für Metadaten)
-                heading = extract_section_heading(page_text)
+                # Überschrift aus dem Rohtext erkennen (für Metadaten)
+                heading = extract_section_heading(page_text_raw)
 
                 # ── Schritt 5: Chunks für diese Seite erzeugen ───────────────
                 for chunk in chunk_text(combined):

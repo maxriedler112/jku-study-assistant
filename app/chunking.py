@@ -2,9 +2,13 @@
 chunking.py – Text-Bereinigung und semantisches Chunking für die RAG-Pipeline.
 
 Ablauf:
-  Rohtext (inkl. optionaler Markdown-Tabellen)
+  Rohtext (inkl. Markdown-Tabellen von extract_page_content)
     → clean_text()   : Artefakte entfernen, Zeilen zusammenführen, Tabellenstruktur schützen
-    → chunk_text()   : Sinnvolle Abschnitte bilden (Satzgrenzen, Tabellenblöcke, Overlap)
+    → chunk_text()   : Sinnvolle Abschnitte bilden mit drei Strategien:
+        1. Tabellenblöcke werden als atomare Einheit behandelt (nie mitten zerrissen)
+        2. Tabellenblöcke bekommen den letzten Satz des vorherigen Chunks als
+           "Lead-in" mitgegeben → LLM versteht den Kontext der Tabelle
+        3. Normaler Text wird an Satzgrenzen mit Overlap-Technik aufgeteilt
     → Liste von Strings, bereit für Embedding-Generierung
 """
 
@@ -69,7 +73,7 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str]:
+def chunk_text(text: str, chunk_size: int = 600, overlap: int = 150) -> List[str]:
     """
     Teilt bereinigten Text in semantisch sinnvolle Chunks auf.
 
@@ -81,8 +85,8 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str
          des nächsten kopiert → Kontext bleibt über Chunk-Grenzen hinweg erhalten
 
     :param text:       Rohtext (bereits bereinigt oder wird intern bereinigt)
-    :param chunk_size: Max. Zeichenanzahl pro Chunk (Standard: 800)
-    :param overlap:    Zeichenanzahl für harte Schnitte bei Überlänge (Standard: 150)
+    :param chunk_size: Max. Zeichenanzahl pro Chunk (Standard: 600)
+    :param overlap:    Zeichenanzahl für harte Schnitte bei Überlänge/Overlap (Standard: 150)
     :returns:          Liste von Chunk-Strings, bereit für Embedding-Generierung
     """
     # Zuerst bereinigen
@@ -115,14 +119,32 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str
     for is_table, segment in segments:
 
         if is_table:
-            # Tabellenblock: passt er noch in den aktuellen Chunk?
+            # ── Tabellenblock-Strategie ───────────────────────────────────────
+            # Tabellen werden NIE mitten zerrissen – sie bleiben immer als Einheit.
+
             if current_chunk and len(current_chunk) + len(segment) + 2 <= chunk_size:
-                # Ja → direkt anhängen
+                # Tabelle passt noch in den laufenden Chunk → direkt anhängen
                 current_chunk += "\n\n" + segment + "\n\n"
             else:
-                # Nein → Chunk abschließen, Tabelle als eigenständigen Chunk speichern
+                # Tabelle passt nicht mehr → neuen Chunk starten.
+                # Lead-in: Letzten Satz des aktuellen Chunks als Kontextsatz
+                # mitgeben, damit der LLM weiß, worüber die Tabelle handelt
+                # (z.B. "Die Pflichtfächer umfassen folgende Kurse:" bleibt
+                #  im selben Chunk wie die ECTS-Tabelle darunter).
+                lead_in = ""
+                if current_chunk.strip():
+                    prev_sentences = re.split(r'(?<=[.!?]) +', current_chunk.strip())
+                    lead_in = prev_sentences[-1].strip() if prev_sentences else ""
+
                 flush()
-                chunks.append(segment)
+
+                if lead_in:
+                    # Lead-in + Tabelle zusammen speichern (kann chunk_size überschreiten –
+                    # das ist gewollt, da Tabellen nicht zerrissen werden sollen)
+                    chunks.append(f"{lead_in}\n\n{segment}")
+                else:
+                    # Kein vorheriger Text → Tabelle direkt als eigenen Chunk
+                    chunks.append(segment)
 
         else:
             # Normaler Text: an Satzenden aufteilen
