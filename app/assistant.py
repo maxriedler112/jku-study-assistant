@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from groq import Groq
 from supabase import create_client, Client
-from search import search_jku_knowledge
+from app.search import search_jku_knowledge
 
 load_dotenv()
 

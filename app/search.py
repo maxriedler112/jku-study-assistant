@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from embeddings import EmbeddingService
+from app.embeddings import EmbeddingService
 
 load_dotenv()
 
