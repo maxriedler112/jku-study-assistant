@@ -179,22 +179,56 @@ def extract_page_content(page) -> str:
     return "\n\n".join(filter(None, parts))
 
 
+# ── Hilfsfunktionen ──────────────────────────────────────────────────────────
+
+def erkennen_abschlussart(pdf_bytes: bytes) -> Optional[str]:
+    """
+    Erkennt die Abschlussart anhand von Schlüsselwörtern in den ersten PDF-Seiten.
+    Gibt "Bachelor", "Master", "Diplom", "Lehramt" oder "Doktorat" zurück, sonst None.
+    """
+    import pdfplumber
+
+    text = ""
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        # Nur die ersten 5 Seiten prüfen – Abschlussart steht meist im Titel
+        for page in pdf.pages[:5]:
+            text += (page.extract_text() or "") + "\n"
+
+    text_lower = text.lower()
+
+    # Treffer pro Abschlussart zählen und den häufigsten zurückgeben
+    kandidaten = {
+        "Master":   len(re.findall(r'\bmaster\b|masterstudium|master of science|master of arts|m\.sc\b|msc\b', text_lower)),
+        "Bachelor": len(re.findall(r'\bbachelor\b|bachelorstudium|bachelor of science|bachelor of arts|b\.sc\b|bsc\b', text_lower)),
+        "Diplom":   len(re.findall(r'\bdiplom\b|diplomstudium|dipl\.-ing\b|magisterstudium|\bmag\.\b', text_lower)),
+        "Lehramt":  len(re.findall(r'\blehramt\b', text_lower)),
+        "Doktorat": len(re.findall(r'\bdoktorat\b|\bphd\b', text_lower)),
+    }
+
+    bester = max(kandidaten, key=kandidaten.get)
+    return bester if kandidaten[bester] > 0 else None
+
+
 # ── Datenbankoperationen ─────────────────────────────────────────────────────
 
-def get_or_create_study_program(code: str, name: str) -> str:
+def get_or_create_study_program(code: str, name: str, degree_type: Optional[str] = None) -> str:
     """
     Gibt die UUID eines Studiengangs zurück.
     Existiert der Studiengang noch nicht, wird er angelegt.
 
-    :param code: Studienkennzahl, z.B. "033 526"
-    :param name: Vollständiger Name, z.B. "Wirtschaftsinformatik BSc"
+    :param code:        Studienkennzahl, z.B. "033 526"
+    :param name:        Vollständiger Name, z.B. "Wirtschaftsinformatik"
+    :param degree_type: Abschlussart, z.B. "Bachelor", "Master", "Diplom"
     """
     result = supabase.table("study_programs").select("id").eq("code", code).execute()
     if result.data:
         return result.data[0]["id"]
 
     # Studiengang existiert noch nicht → neu anlegen
-    insert = supabase.table("study_programs").insert({"code": code, "name": name}).execute()
+    row = {"code": code, "name": name}
+    if degree_type:
+        row["degree_type"] = degree_type
+    insert = supabase.table("study_programs").insert(row).execute()
     return insert.data[0]["id"]
 
 

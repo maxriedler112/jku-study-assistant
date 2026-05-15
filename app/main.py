@@ -4,14 +4,14 @@ import streamlit as st
 from supabase import create_client
 from dotenv import load_dotenv
 from assistant import ask_assistant
-from pipeline import process_pdf, process_ics, get_or_create_study_program
+from pipeline import process_pdf, process_ics, get_or_create_study_program, erkennen_abschlussart, supabase as service_supabase
 
 load_dotenv()
 
 # ==============================================================================
 # ### TEMP: HARDCODED USER_ID FÜR TESTS ###
 # TODO: Diese ID später durch die Login-Logik / UI-Input ersetzen
-TEMP_USER_ID = "61a487b6-af7f-459e-ae78-2fce48be88c6" 
+TEMP_USER_ID = "61a487b6-af7f-459e-ae78-2fce48be88c6"
 # ==============================================================================
 
 # Env-Validierung beim Start
@@ -23,6 +23,11 @@ if not _supabase_url or not _supabase_anon:
     st.stop()
 
 supabase = create_client(_supabase_url, _supabase_anon)
+
+@st.cache_data(ttl=60)
+def lade_studiengaenge() -> list[dict]:
+    """Lädt alle Studiengänge aus der Datenbank via Service-Role-Key (umgeht RLS)."""
+    return service_supabase.table("study_programs").select("id,code,name,degree_type").order("name").execute().data or []
 
 # Initialisierung der Session States
 if "user_id" not in st.session_state:
@@ -56,18 +61,28 @@ with st.sidebar:
         else:
             with st.spinner("PDF wird verarbeitet..."):
                 try:
-                    program_id = get_or_create_study_program(program_code, program_name)
-                    # Hier wird die hardcodierte user_id mitgegeben
-                    n = process_pdf(uploaded_pdf.read(), uploaded_pdf.name, program_id, st.session_state.user_id)
-                    st.success(f"✅ {n} Chunks erstellt und gespeichert!")
+                    pdf_bytes = uploaded_pdf.read()
+                    # Abschlussart automatisch aus dem PDF-Inhalt erkennen
+                    degree_type = erkennen_abschlussart(pdf_bytes)
+                    program_id = get_or_create_study_program(program_code, program_name, degree_type)
+                    n = process_pdf(pdf_bytes, uploaded_pdf.name, program_id, st.session_state.user_id)
+                    # Cache leeren, damit der neue Studiengang sofort im Filter erscheint
+                    lade_studiengaenge.clear()
+                    label = f" ({degree_type})" if degree_type else ""
+                    st.success(f"✅ {n} Chunks erstellt! Erkannter Abschluss: {degree_type or 'unbekannt'}")
                 except Exception as e:
                     st.error(f"Fehler: {e}")
 
     st.divider()
     st.header("🔍 Suche einschränken")
-    programs = supabase.table("study_programs").select("id,code,name").execute().data or []
+
+    # Studiengänge aus dem Cache laden (wird automatisch nach 60 s aktualisiert)
+    programs = lade_studiengaenge()
     program_options = {"Alle Studiengänge": None}
-    program_options.update({f"{p['code']} – {p['name']}": p["id"] for p in programs})
+    for p in programs:
+        # Abschlussart in Klammern anhängen, falls vorhanden (z.B. "526 – Wirtschaftsinformatik (Bachelor)")
+        suffix = f" ({p['degree_type']})" if p.get("degree_type") else ""
+        program_options[f"{p['code']} – {p['name']}{suffix}"] = p["id"]
 
     selected_label = st.selectbox("Studiengang filtern", options=list(program_options.keys()))
     st.session_state.study_program_id = program_options[selected_label]
