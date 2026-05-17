@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Paperclip, FileText, X, Mic, LogOut, Bell, User, LayoutDashboard, Calendar, BookOpen, Coffee, Map, HelpCircle, Image as ImageIcon, Sparkles, Clock, MapPin, Utensils } from 'lucide-react';
+import { Send, Paperclip, FileText, X, Mic, LogOut, Bell, User, LayoutDashboard, Calendar, BookOpen, Coffee, Map, HelpCircle, Sparkles, Clock, MapPin, Utensils } from 'lucide-react';
 import { ScheduleView } from './ScheduleView';
 import { ExamsView } from './ExamsView';
 
@@ -41,7 +41,11 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
   const [showSchedule, setShowSchedule] = useState(false);
   const [showExams, setShowExams] = useState(false);
   const [scheduleFile, setScheduleFile] = useState<File | null>(null);
+  const [scheduleIcsText, setScheduleIcsText] = useState<string | null>(null);
   const [examsFile, setExamsFile] = useState<File | null>(null);
+  const [examsIcsText, setExamsIcsText] = useState<string | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [studyProgram, setStudyProgram] = useState<'bachelor' | 'master'>('bachelor');
 
   // KI-Schnittstelle: Arrays für Events, die vom AI Assistant befüllt werden können
   const [scheduleEvents, setScheduleEvents] = useState<Array<{
@@ -72,6 +76,30 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
     scrollToBottom();
   }, [messages]);
 
+  const handleScheduleIcsUpload = (file: File) => {
+    setScheduleFile(file);
+    file.text()
+      .then((text) => {
+        setScheduleIcsText(text);
+        setAttachmentError(null);
+      })
+      .catch(() => {
+        setAttachmentError('Die iCal-Datei konnte nicht gelesen werden.');
+      });
+  };
+
+  const handleExamsIcsUpload = (file: File) => {
+    setExamsFile(file);
+    file.text()
+      .then((text) => {
+        setExamsIcsText(text);
+        setAttachmentError(null);
+      })
+      .catch(() => {
+        setAttachmentError('Die iCal-Datei konnte nicht gelesen werden.');
+      });
+  };
+
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -88,23 +116,53 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
       setAttachedFiles([]);
       setIsTyping(true);
 
-      setTimeout(() => {
-        setIsTyping(false);
-        const response: Message = {
-          id: messages.length + 2,
-          text: 'Ich analysiere Ihre Anfrage und durchsuche alle relevanten Datenbanken, um Ihnen die bestmögliche Antwort zu geben...',
-          sender: 'assistant',
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, response]);
-      }, 1500);
+      console.log('Chat send:', { inputText, attachedFiles });
+
+      fetch('http://127.0.0.1:8000/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: inputText,
+          study_program_id: studyProgram,
+          schedule_ics: scheduleIcsText,
+          exams_ics: examsIcsText,
+        }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          console.log('Chat response:', data);
+          const response: Message = {
+            id: messages.length + 2,
+            text: data.response,
+            sender: 'assistant',
+            timestamp: new Date(),
+          };
+
+          setMessages((prev) => [...prev, response]);
+          setIsTyping(false);
+        })
+        .catch((err) => {
+          console.error('Chat error:', err);
+          setIsTyping(false);
+        });
     }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    const pdfFiles = files.filter(file => file.type === 'application/pdf');
-    setAttachedFiles([...attachedFiles, ...pdfFiles]);
+    const pdfFiles = files.filter(file => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'));
+    const invalidFiles = files.filter(file => !(file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')));
+
+    if (pdfFiles.length > 0) {
+      setAttachedFiles([...attachedFiles, ...pdfFiles]);
+      setAttachmentError(null);
+    }
+
+    if (invalidFiles.length > 0) {
+      setAttachmentError('Nur PDF-Dateien können hier angehängt werden.');
+    }
   };
 
   const removeFile = (index: number) => {
@@ -140,7 +198,7 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
         <ScheduleView
           scheduleFile={scheduleFile}
           scheduleEvents={scheduleEvents}
-          onFileUpload={setScheduleFile}
+          onFileUpload={handleScheduleIcsUpload}
           onClose={() => setShowSchedule(false)}
         />
       )}
@@ -149,13 +207,12 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
         <ExamsView
           examsFile={examsFile}
           examEvents={examEvents}
-          onFileUpload={setExamsFile}
+          onFileUpload={handleExamsIcsUpload}
           onClose={() => setShowExams(false)}
         />
       )}
 
-    <div className="size-full flex bg-gradient-to-br from-[#0a0a0a] via-[#1a1a1a] to-[#0f1f15] relative overflow-hidden">
-      {/* Animated Background Elements */}
+<div className="w-full h-screen flex bg-gradient-to-br from-[#0a0a0a] via-[#1a1a1a] to-[#0f1f15] relative overflow-hidden">      {/* Animated Background Elements */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-20 right-20 w-96 h-96 bg-white/10 rounded-full blur-3xl animate-pulse"></div>
         <div className="absolute bottom-40 left-40 w-96 h-96 bg-white/5 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '2s' }}></div>
@@ -355,6 +412,26 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
         <div className="px-4 py-5">
           <div className="max-w-4xl mx-auto">
             <form onSubmit={handleSendMessage}>
+              <div className="mb-4 flex flex-wrap items-center gap-3">
+                <span className="text-sm text-gray-400">Studiengang:</span>
+                <button
+                  type="button"
+                  onClick={() => setStudyProgram('bachelor')}
+                  className={`px-4 py-2 rounded-2xl transition text-sm ${studyProgram === 'bachelor' ? 'bg-white text-black' : 'bg-white/5 text-gray-300 hover:bg-white/10'}`}
+                >
+                  Bachelor Wirtschaftsinformatik
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStudyProgram('master')}
+                  className={`px-4 py-2 rounded-2xl transition text-sm ${studyProgram === 'master' ? 'bg-white text-black' : 'bg-white/5 text-gray-300 hover:bg-white/10'}`}
+                >
+                  Master Wirtschaftsinformatik
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mb-3">
+                Der AI Assistant verwendet nur Inhalte aus dem gewählten Studiengang. iCal-Dateien für Stundenplan und Prüfungen werden zusätzlich verarbeitet.
+              </p>
               <div className="relative flex items-center gap-3 bg-white/5 backdrop-blur-xl border-2 border-white/10 focus-within:border-white rounded-2xl px-2 py-2 transition-all shadow-lg shadow-black/20">
                 <input
                   type="file"
@@ -372,14 +449,6 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
                   title="Datei hochladen"
                 >
                   <Paperclip className="w-5 h-5" />
-                </button>
-
-                <button
-                  type="button"
-                  className="flex-shrink-0 p-3 hover:bg-white/10 rounded-xl transition text-gray-400 hover:text-white"
-                  title="Bild hochladen"
-                >
-                  <ImageIcon className="w-5 h-5" />
                 </button>
 
                 <input
@@ -411,6 +480,11 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
               </div>
             </form>
 
+            {attachmentError && (
+              <p className="text-xs text-red-400 text-center mt-3">
+                {attachmentError}
+              </p>
+            )}
             <p className="text-xs text-gray-500 text-center mt-3">
               JKU AI Assistant kann Fehler machen. Überprüfen Sie wichtige Informationen.
             </p>

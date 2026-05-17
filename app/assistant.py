@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from groq import Groq
+from ics import Calendar
 from supabase import create_client, Client
 from app.search import search_jku_knowledge
 
@@ -96,7 +97,41 @@ def query_events(question: str, user_id: str) -> str:
     return "\n".join(lines)
 
 
-def ask_assistant(question: str, user_id: str = None, study_program_id: str = None):
+def parse_ics_text(ics_text: str, section_name: str) -> str:
+    if not ics_text:
+        return ""
+
+    try:
+        cal = Calendar(ics_text)
+    except Exception as exc:
+        print(f"parse_ics_text: Fehler beim Parsen von {section_name}: {exc}")
+        return ""
+
+    lines = []
+    for event in sorted(cal.events, key=lambda ev: ev.begin or date.min):
+        start = event.begin.isoformat() if event.begin else "unbekannt"
+        end = event.end.isoformat() if event.end else ""
+        summary = event.name or "Kein Titel"
+        location = event.location or ""
+        description = (event.description or "").replace('\n', ' ').strip()
+
+        line = f"- {start}"
+        if end:
+            line += f" bis {end}"
+        line += f": {summary}"
+        if location:
+            line += f" | Ort: {location}"
+        if description:
+            line += f" | {description}"
+        lines.append(line)
+
+    if not lines:
+        return ""
+
+    return f"{section_name}:\n" + "\n".join(lines)
+
+
+def ask_assistant(question: str, user_id: str = None, study_program_id: str = None, schedule_ics: str = None, exams_ics: str = None):
     context_parts = []
 
     # 1. Zeitbasierte Frage → Events aus DB
@@ -111,13 +146,43 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
         chunks_text = "\n\n".join([res["content"] for res in results])
         context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
 
+    if schedule_ics:
+        schedule_text = parse_ics_text(schedule_ics, "Stundenplan-Events")
+        if schedule_text:
+            context_parts.append(schedule_text)
+
+    if exams_ics:
+        exams_text = parse_ics_text(exams_ics, "Prüfungstermine")
+        if exams_text:
+            context_parts.append(exams_text)
+
+    if study_program_id and not context_parts:
+        program_label = "Master Wirtschaftsinformatik" if study_program_id == "master" else "Bachelor Wirtschaftsinformatik"
+        return (
+            f"Für den gewählten Studiengang ({program_label}) sind derzeit keine Inhalte verfügbar. "
+            "Bitte stelle eine Frage, die zu diesem Studiengang passt, oder wähle den anderen Studiengang aus."
+        )
+
     context_text = (
         "\n\n---\n\n".join(context_parts)
         if context_parts
         else "Keine relevanten Informationen gefunden."
     )
 
+    program_label = None
+    if study_program_id == "master":
+        program_label = "Master Wirtschaftsinformatik"
+    elif study_program_id == "bachelor":
+        program_label = "Bachelor Wirtschaftsinformatik"
+
+    program_hint = (
+        f"Nutze ausschließlich Informationen aus dem Studiengang: {program_label}.\n"
+        if program_label
+        else "Nutze alle verfügbaren Studiengangsinformationen.\n"
+    )
+
     system_prompt = f"""Du bist ein hilfreicher Studien-Assistent für die JKU (Johannes Kepler Universität).
+{program_hint}
 Nutze NUR den unten stehenden Kontext, um die Frage des Nutzers zu beantworten.
 Wenn die Antwort nicht im Kontext steht, sage höflich, dass du das nicht weißt.
 Beantworte die Frage präzise und freundlich auf Deutsch.
