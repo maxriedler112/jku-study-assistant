@@ -96,38 +96,59 @@ def query_events(question: str, user_id: str) -> str:
     return "\n".join(lines)
 
 
-def ask_assistant(question: str, user_id: str = None, study_program_id: str = None):
+def _is_list_question(question: str) -> bool:
+    """
+    Erkennt ob eine Frage eine vollständige Liste erwartet
+    (Kurse, Fächer, LVAs, etc.) statt einer kurzen Erklärung.
+    """
+    list_keywords = [
+        "welche kurse", "welche fächer", "welche lehrveranstaltungen",
+        "welche lvas", "alle kurse", "alle fächer", "liste",
+        "auflistung", "überblick", "was gibt es", "steop kurse",
+        "pflichtfächer", "wahlfächer", "freifächer",
+        "welche vorlesungen", "welche übungen",
+    ]
+    q_lower = question.lower()
+    return any(kw in q_lower for kw in list_keywords)
+
+
+def ask_assistant(question: str, user_id: str = None, study_program_id: str = None) -> str:
     context_parts = []
 
-    # 1. Zeitbasierte Frage → Events aus DB
+    # Zeitbasierte Frage → Kalender
     if user_id and _is_valid_user_id(user_id) and is_time_based(question):
         events_text = query_events(question, user_id)
         if events_text:
             context_parts.append(f"KALENDER-EINTRÄGE:\n{events_text}")
 
-    # 2. Inhaltliche Frage → Vektorsuche (gefiltert nach Studiengang wenn angegeben)
-    results = search_jku_knowledge(question, study_program_id=study_program_id)
-    if results:
-        chunks_text = "\n\n".join([res["content"] for res in results])
-        context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
+    # Listenfragen brauchen mehr Chunks
+    match_count = 12 if _is_list_question(question) else 6
 
-    context_text = (
-        "\n\n---\n\n".join(context_parts)
-        if context_parts
-        else "Keine relevanten Informationen gefunden."
+    results = search_jku_knowledge(
+        question,
+        study_program_id=study_program_id,
+        match_count=match_count,
     )
 
-    context_text = (
-    "\n\n".join(context_parts)
-    if context_parts
-    else "Keine relevanten Informationen in der Wissensdatenbank gefunden."
-)
+    if results:
+        # Tabellen-Chunks zuerst sortieren bei Listenfragen
+        if _is_list_question(question):
+            results.sort(key=lambda r: (
+                0 if "|" in r.get("content", "") else 1  # Tabellen vorne
+            ))
+        chunks_text = "\n\n---\n\n".join([res["content"] for res in results])
+        context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
 
-    system_prompt = f"""Du bist ein hilfreicher Studien-Assistent für die JKU (Johannes Kepler Universität).
-Nutze NUR den unten stehenden Kontext, um die Frage des Nutzers zu beantworten.
-Wenn die Antwort nicht im Kontext steht, sage höflich, dass du das nicht weißt.
-Beantworte die Frage präzise und freundlich auf Deutsch.
-Heute ist der {date.today().strftime('%d.%m.%Y')}.
+    system_prompt = f"""Du bist ein hilfreicher Studien-Assistent für die JKU.
+Nutze NUR den unten stehenden Kontext für deine Antwort.
+
+WICHTIGE REGELN:
+- Bei Fragen nach Kursen, Fächern oder Lehrveranstaltungen: 
+  Liste ALLE im Kontext genannten auf, nicht nur die ersten.
+- Wenn Tabellen im Kontext stehen: übertrage sie vollständig als Liste.
+- Antworte auf Deutsch. Heute: {date.today().strftime('%d.%m.%Y')}.
+- Wenn Informationen fehlen: sage es ehrlich.
+- Erfinde KEINE Kurse oder ECTS-Punkte.
 
 KONTEXT:
 {context_text}

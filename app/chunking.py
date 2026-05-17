@@ -1,15 +1,39 @@
 """
 chunking.py – Text-Bereinigung und semantisches Chunking für die RAG-Pipeline.
+===============================================================================
 
-Ablauf:
-  Rohtext (inkl. Markdown-Tabellen von extract_page_content)
-    → clean_text()   : Artefakte entfernen, Zeilen zusammenführen, Tabellenstruktur schützen
-    → chunk_text()   : Sinnvolle Abschnitte bilden mit drei Strategien:
-        1. Tabellenblöcke werden als atomare Einheit behandelt (nie mitten zerrissen)
-        2. Tabellenblöcke bekommen den letzten Satz des vorherigen Chunks als
-           "Lead-in" mitgegeben → LLM versteht den Kontext der Tabelle
-        3. Normaler Text wird an Satzgrenzen mit Overlap-Technik aufgeteilt
-    → Liste von Strings, bereit für Embedding-Generierung
+Diese Datei ist für die "Portionierung" des extrahierten Textes zuständig.
+Das KI-Modell kann nicht ganze PDFs auf einmal verarbeiten – es braucht
+kleine, thematisch zusammenhängende Abschnitte ("Chunks").
+
+ABLAUF:
+  Rohtext (inkl. Markdown-Tabellen von extract_page_content aus pipeline.py)
+    │
+    ▼
+  clean_text()
+    Artefakte entfernen, Silbentrennung reparieren, Zeilen zusammenführen,
+    Tabellenstruktur (Markdown "|"-Zeilen) schützen
+    │
+    ▼
+  chunk_text()
+    Text in sinnvolle Abschnitte aufteilen – mit drei Strategien:
+      1. Tabellenblöcke werden als atomare Einheit behandelt (nie zerrissen)
+      2. Tabellenblöcke erhalten den Überschrifts-Kontext + den letzten Satz
+         des vorherigen Chunks als "Lead-in" → LLM versteht den Tabellenkontext
+      3. Normaler Text wird an Satzgrenzen mit Overlap-Technik aufgeteilt
+         → Kontext bleibt über Chunk-Grenzen hinweg erhalten
+    │
+    ▼
+  Liste von Strings → bereit für Embedding-Generierung (embeddings.py)
+
+WARUM CHUNKS STATT VOLLTEXTSUCHE?
+  Embeddings funktionieren am besten bei kurzen, thematisch fokussierten Texten.
+  Zu lange Chunks "verwässern" den Vektor (viele Themen → kein klarer Schwerpunkt).
+  Zu kurze Chunks verlieren den Kontext.
+  600 Zeichen mit 150 Zeichen Overlap ist ein bewährter Kompromiss für
+  akademische Dokumente wie Curricula.
+
+Abhängigkeiten: Nur Python-Standardbibliothek (re, typing)
 """
 
 import re
@@ -18,56 +42,98 @@ from typing import List
 
 def clean_text(text: str) -> str:
     """
-    Bereinigt Rohtext aus PDFs.
+    Bereinigt Rohtext aus PDFs und bereitet ihn für das Chunking vor.
 
-    Schritte:
-      A. PDF-spezifische Footer-Zeilen entfernen (z.B. "Seite 2 von 16")
-      B. Silbentrennung rückgängig machen ("Lehrveranstal-\\ntung" → "Lehrveranstaltung")
-      C. Zusammengeklebte Wörter trennen ("Basisund" → "Basis und")
-      D. Harte Zeilenumbrüche zusammenführen – Markdown-Tabellenzeilen bleiben intakt
-      E. Mehrfache Leerzeichen entfernen
+    PDFs sind oft "schmutziger" als sie aussehen: Silbentrennung über
+    Zeilenenden, zusammengeklebte Wörter durch Encoding-Fehler, Footer-Texte
+    die mitten in Absätzen auftauchen, etc. Diese Funktion behebt diese
+    häufigen Probleme systematisch.
 
-    :param text: Rohtext aus pdfplumber
-    :returns:    Bereinigter Text
+    VERARBEITUNGSSCHRITTE:
+      A. PDF-Footer entfernen
+         Muster wie "Seite 3 von 16" oder automatisch eingefügte
+         Genehmigungsvermerke werden gelöscht.
+
+      B. Silbentrennung reparieren
+         PDFs trennen lange Wörter am Zeilenende mit Bindestrich:
+         "Lehrveranstal-\ntung" → "Lehrveranstaltung"
+         Das ist wichtig damit das Embedding das Wort korrekt erkennt.
+
+      C. Zusammengeklebte Wörter trennen
+         pdfplumber verbindet manchmal Wörter ohne Leerzeichen:
+         "Basisund" → "Basis und", "WirtschaftsinformatikerInnen" bleibt
+         Erkennungsmuster: Kleinbuchstabe direkt gefolgt von Großbuchstabe
+
+      D. Zeilenumbrüche intelligent zusammenführen
+         Drei Fälle werden unterschieden:
+         - Tabellenzeilen (beginnen mit "|"): Zeilenumbruch beibehalten!
+           → Markdown-Tabellenstruktur darf nicht zerstört werden
+         - Zeile endet ohne Satzzeichen: Leerzeichen anhängen
+           → Nächste Zeile gehört zum selben Satz
+         - Zeile endet mit Satzzeichen: echter Absatzumbruch
+           → Klarer Trennpunkt für den Chunking-Algorithmus
+
+      E. Mehrfache Leerzeichen normalisieren
+         Doppelte/dreifache Leerzeichen auf eines reduzieren.
+         Zeilenumbrüche (\\n) bleiben dabei erhalten!
+
+    :param text: Rohtext aus pdfplumber (oder kombinierter Text aus extract_page_content)
+    :returns:    Bereinigter Text, bereit für chunk_text()
     """
     if not text:
         return ""
 
-    # A. PDF-Footer entfernen (Genehmigungsvermerke, Seitenzahlen)
+    # ── A. PDF-Footer entfernen ───────────────────────────────────────────────
+    # Genehmigungsvermerke wie "GenehmigtvomSenat2024-05-12Inkrafttreten:2024-10-01"
+    # entstehen wenn pdfplumber die Fußzeile ohne Leerzeichen zusammensetzt.
     text = re.sub(r'GenehmigtvomSenat\S+.*?Inkrafttreten:\S+', '', text)
+    # Seitenzahlen-Muster: "Seite 3 von 16", "Seite3von16", etc.
     text = re.sub(r'Seite\s*\d+\s*von\s*\d+', '', text)
 
-    # B. Silbentrennung reparieren: "Wort-\nfort" → "Wortfort"
+    # ── B. Silbentrennung reparieren ─────────────────────────────────────────
+    # Regex: Buchstabe + Bindestrich + optionales Leerzeichen + Zeilenumbruch + Buchstabe
+    # → Bindestrich und Umbruch entfernen, Wörter zusammenfügen
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
 
-    # C. Zusammengeklebte Wörter trennen (passiert oft bei pdfplumber-Extraktion):
-    #    Erkennt: Kleinbuchstabe direkt gefolgt von Großbuchstabe → Leerzeichen einfügen
+    # ── C. Zusammengeklebte Wörter trennen ───────────────────────────────────
+    # Erkennt: Kleinbuchstabe (inkl. deutsche Umlaute) direkt vor Großbuchstabe
+    # ACHTUNG: Echte CamelCase-Wörter wie "iPhone" werden auch getrennt → akzeptabler
+    # Trade-off für akademische Texte die kein CamelCase verwenden
     text = re.sub(r'([a-zäöüß])([A-ZÄÖÜ])', r'\1 \2', text)
 
-    # D. Zeilen zusammenführen – unterscheidet zwischen:
-    #    - Tabellenzeilen (beginnen mit "|"): Zeilenumbruch beibehalten → Tabellenstruktur bleibt
-    #    - Zeilen ohne Satzzeichen am Ende: Leerzeichen anhängen (gehören zusammen)
-    #    - Zeilen mit Satzzeichen am Ende: echten Absatz-Umbruch einfügen
+    # ── D. Zeilenumbrüche intelligent zusammenführen ─────────────────────────
     lines = text.split('\n')
     cleaned_lines = []
+
     for line in lines:
         line = line.strip()
         if not line:
-            continue    # Leerzeilen überspringen
+            continue    # Komplett leere Zeilen überspringen
+
         cleaned_lines.append(line)
+
         if line.startswith('|'):
-            # Markdown-Tabellenzeile → Zeilenumbruch beibehalten
+            # TABELLENZEILE: Zeilenumbruch beibehalten!
+            # Markdown-Tabellen brauchen echte Zeilenumbrüche zwischen den Zeilen.
+            # Würden wir sie zusammenführen, wäre die Tabelle kaputt.
             cleaned_lines[-1] += "\n"
+
         elif not re.search(r'[.!?:]$', line):
-            # Zeile endet nicht mit Satzzeichen → nächste Zeile gehört wahrscheinlich dazu
+            # KEIN SATZZEICHEN AM ENDE: Nächste Zeile gehört dazu
+            # → Leerzeichen anhängen statt Zeilenumbruch
+            # Beispiel: "Die Pflichtfächer des ersten" + " Semesters umfassen..."
             cleaned_lines[-1] += " "
+
         else:
-            # Satzende erkannt → echter Absatzumbruch
+            # SATZZEICHEN AM ENDE: Echter Absatzumbruch
+            # → \n einfügen damit chunk_text() später saubere Grenzen findet
             cleaned_lines[-1] += "\n"
 
     text = "".join(cleaned_lines)
 
-    # E. Mehrfache Leerzeichen auf eines reduzieren (Zeilenumbrüche \n bleiben erhalten)
+    # ── E. Mehrfache Leerzeichen normalisieren ────────────────────────────────
+    # [^\S\n] = alles was Whitespace ist, aber kein Zeilenumbruch
+    # → Mehrfache Leerzeichen/Tabs auf eines reduzieren, \n bleibt erhalten
     text = re.sub(r"[^\S\n]+", " ", text)
 
     return text.strip()
@@ -77,77 +143,166 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 150) -> List[str
     """
     Teilt bereinigten Text in semantisch sinnvolle Chunks auf.
 
-    Strategie:
-      1. Text in Segmente aufteilen: Markdown-Tabellenblöcke vs. normaler Text
-      2. Tabellenblöcke bleiben als Ganzes erhalten (oder bekommen einen eigenen Chunk)
-      3. Normaler Text wird an Satzgrenzen geschnitten
-      4. Overlap: Der letzte Satz des vorherigen Chunks wird an den Anfang
-         des nächsten kopiert → Kontext bleibt über Chunk-Grenzen hinweg erhalten
+    Dies ist die Kerlfunktion des Chunkings. Sie berücksichtigt die
+    spezielle Struktur von Studienhandbüchern: Gemisch aus Fließtext
+    und Markdown-Tabellen (ECTS-Listen, Lehrveranstaltungsübersichten, etc.)
 
-    :param text:       Rohtext (bereits bereinigt oder wird intern bereinigt)
-    :param chunk_size: Max. Zeichenanzahl pro Chunk (Standard: 600)
-    :param overlap:    Zeichenanzahl für harte Schnitte bei Überlänge/Overlap (Standard: 150)
-    :returns:          Liste von Chunk-Strings, bereit für Embedding-Generierung
+    DREI-STRATEGIE-ANSATZ:
+
+    Strategie 1 – Tabellenblöcke (atomare Einheit):
+      Tabellen werden NIEMALS zerrissen. Eine halbierte ECTS-Tabelle ist
+      für das LLM wertlos ("Hat Mathematik 4 oder 5 ECTS? → Zeile fehlt!")
+      Wenn eine Tabelle zu groß für einen Chunk ist, bekommt sie einen
+      eigenen Chunk – auch wenn dieser chunk_size überschreitet.
+
+    Strategie 2 – Lead-in für Tabellen (Kontext-Erhalt):
+      Tabellen werden oft eingeleitet: "Die Pflichtfächer sind:"
+      Ohne diesen Einleitungssatz weiß das LLM nicht, was die Tabelle zeigt.
+      Lösung: Den letzten Satz des vorherigen Chunks ALS ERSTES in den
+      Tabellen-Chunk einfügen ("Lead-in").
+      Zusätzlich: Falls eine Kapitelüberschrift bekannt ist, wird sie
+      ganz an den Anfang des Tabellen-Chunks gestellt.
+
+    Strategie 3 – Overlap für Fließtext (Kontext-Kontinuität):
+      Wenn ein Chunk voll ist und ein neuer beginnt, wird der letzte Satz
+      des alten Chunks an den Anfang des neuen kopiert.
+      So geht bei Fragen die über Chunk-Grenzen gehen kein Kontext verloren.
+      Beispiel: "...ist im dritten Semester." | "Im dritten Semester..."
+
+    PARAMETER:
+      chunk_size: 600 Zeichen ≈ 90-100 Wörter ≈ gut für E5-Embedding-Modell
+      overlap:    150 Zeichen ≈ 1-2 Sätze als Kontext-Überlapp
+
+    :param text:       Rohtext (wird intern automatisch durch clean_text() bereinigt)
+    :param chunk_size: Maximale Zeichenanzahl pro Chunk (Standard: 600)
+    :param overlap:    Zeichenanzahl für Überlapp bei harten Schnitten (Standard: 150)
+    :returns:          Liste von Chunk-Strings, bereit für EmbeddingService
     """
-    # Zuerst bereinigen
+    # Zuerst bereinigen (clean_text() ist idempotent – doppelter Aufruf schadet nicht)
     text = clean_text(text)
 
+    if not text.strip():
+        return []
+
     # ── Schritt 1: Text in Tabellen- und Text-Segmente aufteilen ─────────────
-    # Ein Tabellenblock = eine oder mehrere aufeinanderfolgende Zeilen die mit | beginnen
+    # Regex erkennt Blöcke von aufeinanderfolgenden Markdown-Tabellenzeilen.
+    # Eine Tabellenzeile beginnt immer mit "|" und endet mit "\n".
+    # Beispiel: "| Fach | ECTS |\n| --- | --- |\n| Mathematik | 4 |\n"
     table_re = re.compile(r'((?:\|[^\n]*\n)+)', re.MULTILINE)
-    segments: list[tuple[bool, str]] = []  # (is_table, content)
+
+    # segments: Liste von (is_table: bool, content: str)
+    # is_table=True  → Markdown-Tabellenblock
+    # is_table=False → normaler Fließtext
+    segments: list[tuple[bool, str]] = []
     last_end = 0
+
     for m in table_re.finditer(text):
+        # Text VOR dieser Tabelle (falls vorhanden)
         if m.start() > last_end:
-            segments.append((False, text[last_end:m.start()]))  # Text vor der Tabelle
-        segments.append((True, m.group().strip()))               # Tabellenblock
+            segments.append((False, text[last_end:m.start()]))
+        # Die Tabelle selbst
+        segments.append((True, m.group().strip()))
         last_end = m.end()
+
+    # Restlicher Text NACH der letzten Tabelle (oder ganzer Text wenn keine Tabelle)
     if last_end < len(text):
-        segments.append((False, text[last_end:]))                # Text nach letzter Tabelle
+        segments.append((False, text[last_end:]))
 
     chunks: List[str] = []
-    current_chunk = ""  # Aktuell aufgebauter Chunk (noch nicht gespeichert)
+    current_chunk = ""      # Aktuell aufgebauter, noch nicht gespeicherter Chunk
+    current_heading = ""    # Zuletzt gesehene Kapitelüberschrift (für Tabellen-Lead-in)
 
     def flush() -> None:
-        """Aktuellen Chunk speichern und zurücksetzen."""
+        """
+        Speichert den aktuellen Chunk in die chunks-Liste und setzt ihn zurück.
+
+        Diese innere Hilfsfunktion vermeidet Code-Duplizierung: Ohne sie müssten
+        wir an jedem Punkt wo ein Chunk abgeschlossen wird dieselben 3 Zeilen
+        wiederholen. Als nonlocal-Funktion kann sie direkt auf current_chunk
+        und chunks aus dem äußeren Scope zugreifen.
+        """
         nonlocal current_chunk
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
         current_chunk = ""
 
-    # ── Schritt 2 & 3: Segmente verarbeiten ──────────────────────────────────
+    def get_last_sentence(text_block: str) -> str:
+        """
+        Extrahiert den letzten vollständigen Satz aus einem Textblock.
+
+        Wird für den Lead-in vor Tabellenblöcken verwendet: Der letzte Satz
+        des vorherigen Chunks erklärt oft, worum es in der folgenden Tabelle geht.
+
+        Beispiel: "Die Lehrveranstaltungen des 3. Semesters sind:" → Lead-in
+                  | LV-Name | ECTS | Typ |    → Tabelle
+                  | Algorithmen | 4 | VL |
+
+        :param text_block: Beliebiger Textblock
+        :returns:          Letzter Satz (ohne abschließende Leerzeichen)
+        """
+        sentences = re.split(r'(?<=[.!?]) +', text_block.strip())
+        return sentences[-1].strip() if sentences else ""
+
+    # ── Schritt 2 & 3: Segmente der Reihe nach verarbeiten ───────────────────
     for is_table, segment in segments:
 
         if is_table:
-            # ── Tabellenblock-Strategie ───────────────────────────────────────
-            # Tabellen werden NIE mitten zerrissen – sie bleiben immer als Einheit.
+            # ════════════════════════════════════════════════════════════════
+            # STRATEGIE 1 & 2: Tabellenblock-Verarbeitung
+            # ════════════════════════════════════════════════════════════════
 
+            # Tabelle passt noch in den laufenden Chunk → einfach anhängen
             if current_chunk and len(current_chunk) + len(segment) + 2 <= chunk_size:
-                # Tabelle passt noch in den laufenden Chunk → direkt anhängen
                 current_chunk += "\n\n" + segment + "\n\n"
+
             else:
                 # Tabelle passt nicht mehr → neuen Chunk starten.
-                # Lead-in: Letzten Satz des aktuellen Chunks als Kontextsatz
-                # mitgeben, damit der LLM weiß, worüber die Tabelle handelt
-                # (z.B. "Die Pflichtfächer umfassen folgende Kurse:" bleibt
-                #  im selben Chunk wie die ECTS-Tabelle darunter).
-                lead_in = ""
-                if current_chunk.strip():
-                    prev_sentences = re.split(r'(?<=[.!?]) +', current_chunk.strip())
-                    lead_in = prev_sentences[-1].strip() if prev_sentences else ""
 
+                # Lead-in: Letzten Satz des aktuellen Chunks extrahieren.
+                # Dieser Satz erklärt typischerweise, was die Tabelle zeigt.
+                lead_in_sentence = get_last_sentence(current_chunk) if current_chunk.strip() else ""
+
+                # Aktuellen Chunk abschließen
                 flush()
 
-                if lead_in:
-                    # Lead-in + Tabelle zusammen speichern (kann chunk_size überschreiten –
-                    # das ist gewollt, da Tabellen nicht zerrissen werden sollen)
-                    chunks.append(f"{lead_in}\n\n{segment}")
-                else:
-                    # Kein vorheriger Text → Tabelle direkt als eigenen Chunk
-                    chunks.append(segment)
+                # Tabellen-Chunk zusammenbauen:
+                # [Überschrift (optional)] + [Lead-in-Satz (optional)] + [Tabelle]
+                table_parts = []
+
+                if current_heading:
+                    # Überschrift ganz vorne → LLM weiß sofort in welchem Kontext
+                    # die Tabelle steht, auch wenn der Lead-in-Satz fehlt
+                    table_parts.append(f"Abschnitt: {current_heading}")
+
+                if lead_in_sentence:
+                    table_parts.append(lead_in_sentence)
+
+                table_parts.append(segment)
+
+                # Tabellen-Chunk speichern.
+                # WICHTIG: chunk_size wird hier bewusst NICHT erzwungen!
+                # Eine halbierte Tabelle ist wertloser als ein zu großer Chunk.
+                chunks.append("\n\n".join(table_parts))
 
         else:
-            # Normaler Text: an Satzenden aufteilen
+            # ════════════════════════════════════════════════════════════════
+            # STRATEGIE 3: Fließtext-Verarbeitung mit Overlap
+            # ════════════════════════════════════════════════════════════════
+
+            # Kapitelüberschriften aus dem Text erkennen und merken.
+            # Heuristik: Zeile komplett in Großbuchstaben ODER nummerierter Abschnitt
+            for line in segment.splitlines()[:5]:
+                line = line.strip()
+                if not line:
+                    continue
+                if (line == line.upper() and len(line) > 5 and not line.isdigit()) or \
+                   re.match(r'^(§\s*\d+|\d+\.(\d+\.)*)\s+\S', line):
+                    current_heading = line
+                    break
+
+            # Text an Satzgrenzen aufteilen.
+            # (?<=[.!?]) ist ein "Lookbehind": splittet NACH dem Satzzeichen,
+            # aber lässt das Satzzeichen beim vorherigen Element.
             sentences = re.split(r'(?<=[.!?]) +', segment)
 
             for sentence in sentences:
@@ -155,10 +310,12 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 150) -> List[str
                 if not sentence:
                     continue
 
+                # Einzelner Satz ist länger als chunk_size (seltener Grenzfall):
+                # Hart an Wortgrenzen zerschneiden mit Overlap-Versatz
                 if len(sentence) > chunk_size:
-                    # Einzelner Satz ist zu lang → hart an Wortgrenzen schneiden
-                    flush()
-                    for i in range(0, len(sentence), chunk_size - overlap):
+                    flush()  # Bisherigen Chunk abschließen
+                    i = 0
+                    while i < len(sentence):
                         end = min(i + chunk_size, len(sentence))
                         if end < len(sentence):
                             # Auf nächste Wortgrenze runden (kein Schnitt mitten im Wort)
@@ -166,25 +323,33 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 150) -> List[str
                             if space_pos > i:
                                 end = space_pos
                         chunks.append(sentence[i:end].strip())
+                        i = end
                     continue
 
                 if len(current_chunk) + len(sentence) + 1 <= chunk_size:
-                    # Satz passt noch in den aktuellen Chunk
+                    # ── Satz passt in den aktuellen Chunk ────────────────────
                     current_chunk += sentence + " "
+
                 else:
-                    # ── Schritt 4: Overlap ────────────────────────────────────
-                    # Letzten Satz des aktuellen Chunks als Kontext-Überlapp mitnehmen
-                    prev_sentences = re.split(r'(?<=[.!?]) +', current_chunk.strip())
-                    overlap_text = (prev_sentences[-1] + " ") if prev_sentences else ""
-                    flush()
-                    # Neuen Chunk mit Overlap-Text + aktuellem Satz starten
+                    # ── Chunk ist voll → OVERLAP-MECHANISMUS ─────────────────
+                    # Letzten Satz des aktuellen Chunks als Kontext-Brücke
+                    # an den Anfang des nächsten Chunks stellen.
+                    # So bleibt der Kontext über die Chunk-Grenze hinweg erhalten.
+                    overlap_text = get_last_sentence(current_chunk) + " "
+
+                    flush()  # Alten Chunk abschließen
+
+                    # Neuen Chunk mit Overlap-Text beginnen
                     if len(overlap_text) + len(sentence) <= chunk_size:
+                        # Overlap + neuer Satz passen zusammen → ideal
                         current_chunk = overlap_text + sentence + " "
                     else:
+                        # Overlap-Text alleine schon zu groß (sehr langer Satz) →
+                        # direkt mit dem neuen Satz beginnen (kein Overlap)
                         current_chunk = sentence + " "
 
-    # Letzten offenen Chunk speichern
+    # Letzten offenen Chunk nicht vergessen!
     flush()
 
-    # Leere Strings herausfiltern (können durch Regex-Splits entstehen)
+    # Sicherheits-Filter: Leere Strings entfernen (können durch Regex-Splits entstehen)
     return [c for c in chunks if c.strip()]
