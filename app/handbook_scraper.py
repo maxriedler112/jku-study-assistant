@@ -131,79 +131,101 @@ def extract_overview_text(html: str, program_name: str) -> str:
 
 def extract_lva_text(html: str, url: str) -> str:
     """
-    Extrahiert den vollstaendigen Inhalt einer LVA-Detailseite als strukturierten Text.
+    Extrahiert den Inhalt einer LVA-Detailseite sauber und ohne Duplikate.
 
-    Erfasste Felder:
-      - LV-Code und Name, ECTS, Ausbildungslevel, Semesterstunden
-      - Studienfachbereich, Verantwortliche/r, Abhaltungssprache
-      - Lernergebnisse, Kompetenzen, Fertigkeiten, Kenntnisse
-      - Beurteilungskriterien, Lehrmethoden, Literatur
-      - Teilungsziffer, Zuteilungsverfahren
+    KERNPROBLEM: Das Studienhandbuch hat verschachtelte Tabellen.
+    find_all("table") + find_all("tr") durchlaeuft innere Tabellen mehrfach
+    weil die aeussere Tabelle die inneren als Kinder enthaelt.
+
+    LOESUNG: Nur direkte Kind-Rows (<tr>) jeder Tabelle verarbeiten
+    (recursive=False), und nur die innerste relevante Tabelle nutzen.
+    Zusaetzlich: seen_values Set verhindert inhaltliche Duplikate.
     """
     soup = BeautifulSoup(html, "html.parser")
 
+    # Navigation und irrelevante Elemente entfernen
     for tag in soup.select("nav, header, footer, script, style, form, "
-                           ".menu, #sidebar, .breadcrumb"):
+                           ".menu, #sidebar, .loginbox"):
         tag.decompose()
 
     parts: list[str] = []
+    seen_values: set[str] = set()  # Verhindert inhaltliche Duplikate
 
-    # LV-Titel aus dem Seitentitel
+    def add_part(text: str) -> None:
+        """Fuegt Text nur hinzu wenn er noch nicht vorhanden ist."""
+        key = text[:80]  # Ersten 80 Zeichen als Duplikat-Schluessel
+        if key not in seen_values and len(text) > 3:
+            seen_values.add(key)
+            parts.append(text)
+
+    # ── 1. LV-Titel ──────────────────────────────────────────────────────────
     title_tag = soup.find("title")
     if title_tag:
         title = title_tag.get_text(strip=True).replace("Studienhandbuch | ", "").strip()
-        if title:
-            parts.append(f"LEHRVERANSTALTUNG: {title}")
+        if title and title != "Studienhandbuch":
+            add_part(f"LEHRVERANSTALTUNG: {title}")
 
-    # Breadcrumb fuer Kontext (Studiengang -> Modul -> LVA)
-    breadcrumb_links = []
+    # ── 2. Breadcrumb ────────────────────────────────────────────────────────
+    breadcrumb = []
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if "/curr/" in href or (re.search(r'/\d+$', href) and "studienhandbuch" in href):
+        if "/curr/" in href or re.match(r".*studienhandbuch\.jku\.at/\d+", href):
             text = a.get_text(strip=True)
-            if text and len(text) > 3:
-                breadcrumb_links.append(text)
+            if text and len(text) > 3 and text not in breadcrumb:
+                breadcrumb.append(text)
+    if breadcrumb:
+        add_part("Studiengang-Kontext: " + " > ".join(breadcrumb[:5]))
 
-    if breadcrumb_links:
-        parts.append("Zugehoerigkeit: " + " -> ".join(breadcrumb_links[:4]))
+    # ── 3. Nur direkte Kind-Rows verarbeiten (kein rekursives find_all) ──────
+    skip_labels = {
+        "versionsauswahl", "version", "inhalt", "detailinformationen",
+        "lernergebnisse", "positionsanzeige", "sprachauswahl", "sprache",
+        "menue", "seitenbereiche", "externe tools", "studienhandbuch-login",
+        "praesenzlehrveranstaltung", "", "versionsauswahl version",
+    }
+    seen_labels: set[str] = set()
 
-    # Alle Tabellen durchsuchen
     for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        for row in rows:
-            cells = row.find_all(["td", "th"])
+        # Nur direkte Kind-Rows - verhindert Mehrfachverarbeitung
+        direct_rows = table.find_all("tr", recursive=False)
+        if not direct_rows:
+            # Manche Tabellen haben tbody als Zwischenschicht
+            tbody = table.find("tbody")
+            if tbody:
+                direct_rows = tbody.find_all("tr", recursive=False)
+
+        for row in direct_rows:
+            # Nur direkte Kind-Zellen
+            cells = row.find_all(["td", "th"], recursive=False)
             if not cells:
                 continue
 
             if len(cells) == 2:
-                label = cells[0].get_text(separator=" ", strip=True)
-                value = cells[1].get_text(separator=" ", strip=True)
+                label = re.sub(r"\s+", " ", cells[0].get_text()).strip()
+                value = re.sub(r"\s+", " ", cells[1].get_text()).strip()
 
-                if not label or not value or len(value) < 2:
-                    continue
-                if label.lower() in ("version", "versionsauswahl", ""):
-                    continue
-
-                parts.append(f"{label}: {value}")
+                if (label and value
+                        and len(value) > 3
+                        and label.lower() not in skip_labels
+                        and label not in seen_labels):
+                    seen_labels.add(label)
+                    add_part(f"{label}: {value}")
 
             elif len(cells) > 2:
-                row_text = " | ".join(
-                    c.get_text(separator=" ", strip=True)
-                    for c in cells
-                    if c.get_text(strip=True)
-                )
-                if row_text and len(row_text) > 10:
-                    parts.append(row_text)
+                texts = [re.sub(r"\s+", " ", c.get_text()).strip() for c in cells]
+                texts = [t for t in texts if t and len(t) > 1]
+                if texts and any(kw in " ".join(texts) for kw in ["ECTS", "SSt"]):
+                    add_part("Metadaten: " + " | ".join(texts))
 
-    # Listenelemente (Lernziele als Bullet Points)
+    # ── 4. Listen (LO1, LO2, Literatur etc.) ─────────────────────────────────
     for ul in soup.find_all(["ul", "ol"]):
         items = []
         for li in ul.find_all("li", recursive=False):
-            text = li.get_text(separator=" ", strip=True)
+            text = re.sub(r"\s+", " ", li.get_text()).strip()
             if text and len(text) > 10:
                 items.append(f"- {text}")
         if items:
-            parts.append("\n".join(items))
+            add_part("\n".join(items))
 
     return "\n\n".join(filter(None, parts))
 
@@ -215,12 +237,13 @@ def extract_lva_text(html: str, url: str) -> str:
 INSERT_BATCH_SIZE = 50   # Rows pro INSERT-Request (Supabase-Limit: ~500, konservativ)
 
 def _chunks_exist_for_program(study_program_id: str) -> bool:
-    """Prueft ob fuer diesen Studiengang bereits Chunks vorhanden sind."""
+    """Prueft ob fuer diesen Studiengang bereits Handbook-Chunks vorhanden sind."""
     result = (
         supabase.table("documents")
         .select("id")
         .eq("study_program_id", study_program_id)
         .eq("status", "processed")
+        .like("filename", "handbook_%")
         .execute()
     )
     return len(result.data) > 0

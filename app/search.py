@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from embeddings import EmbeddingService
@@ -50,8 +51,17 @@ def _expand_query(query: str) -> str:
         "PR":    "Praktikum PR",
         "LVA":   "Lehrveranstaltung LVA",
         "StEOP": "Studieneingangs- und Orientierungsphase StEOP",
+        "beurteilung":    "Beurteilungskriterien Pruefung Abschlussklausur",
+        "benotet":        "Beurteilungskriterien Note",
+        "pruefung":       "Beurteilungskriterien Pruefungsmodalitaeten",
+        "wie wird":       "Beurteilungskriterien",
+        "lehrmethode":    "Lehrmethoden Vortrag Uebung",
+        "sprache":        "Abhaltungssprache Deutsch Englisch",
+        "voraussetzung":  "Anmeldevoraussetzungen",
+        "teilungsziffer": "Teilungsziffer Zuteilungsverfahren",
     }
     result = query
-    for abbr, expanded in expansions.items():
-        result = re.sub(rf'\b{abbr}\b', expanded, result, flags=re.IGNORECASE)
+    for term, expanded in expansions.items():
+        if term in result.lower():
+            result = result + " " + expanded
     return result
