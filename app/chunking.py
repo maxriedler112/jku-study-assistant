@@ -141,42 +141,63 @@ def clean_text(text: str) -> str:
 
 def chunk_text(text: str, chunk_size: int = 600, overlap: int = 150) -> List[str]:
     """
-    Teilt bereinigten Text in semantisch sinnvolle Chunks auf.
+    Teilt bereinigten Text in semantisch sinnvolle Chunks auf und bettet in
+    jeden Chunk den zugehörigen Sektions-Header ein (Contextual Chunking).
 
-    Dies ist die Kerlfunktion des Chunkings. Sie berücksichtigt die
-    spezielle Struktur von Studienhandbüchern: Gemisch aus Fließtext
-    und Markdown-Tabellen (ECTS-Listen, Lehrveranstaltungsübersichten, etc.)
+    WARUM CONTEXTUAL CHUNKING?
+      Ohne Header-Einbettung kann ein Chunk wie "Die LVA wird auf Deutsch
+      gehalten. 3 ECTS." nicht dem richtigen Fach zugeordnet werden – der
+      Embedding-Vektor enthält keine Information darüber, zu welchem Paragraph
+      dieser Text gehört. Durch das Voranstellen des Headers (z.B.
+      "[§ 5 Einführung in Wirtschaftsinformatik]") enthält jeder Chunk diese
+      Information explizit, sodass die Vektorsuche ihn auch bei Fragen wie
+      "Was lerne ich in Einführung in WI?" korrekt findet.
 
     DREI-STRATEGIE-ANSATZ:
 
     Strategie 1 – Tabellenblöcke (atomare Einheit):
       Tabellen werden NIEMALS zerrissen. Eine halbierte ECTS-Tabelle ist
-      für das LLM wertlos ("Hat Mathematik 4 oder 5 ECTS? → Zeile fehlt!")
+      für das LLM wertlos ("Hat Mathematik 4 oder 5 ECTS? → Zeile fehlt!").
       Wenn eine Tabelle zu groß für einen Chunk ist, bekommt sie einen
       eigenen Chunk – auch wenn dieser chunk_size überschreitet.
 
-    Strategie 2 – Lead-in für Tabellen (Kontext-Erhalt):
-      Tabellen werden oft eingeleitet: "Die Pflichtfächer sind:"
+    Strategie 2 – Lead-in + Header für Tabellen (Kontext-Erhalt):
+      Tabellen werden oft eingeleitet: "Die Pflichtfächer des 2. Semesters sind:"
       Ohne diesen Einleitungssatz weiß das LLM nicht, was die Tabelle zeigt.
       Lösung: Den letzten Satz des vorherigen Chunks ALS ERSTES in den
-      Tabellen-Chunk einfügen ("Lead-in").
-      Zusätzlich: Falls eine Kapitelüberschrift bekannt ist, wird sie
-      ganz an den Anfang des Tabellen-Chunks gestellt.
+      Tabellen-Chunk einfügen ("Lead-in"). Zusätzlich wird der aktuelle
+      Sektions-Header ganz vorne eingefügt, sodass auch Tabellen-Chunks
+      eindeutig einem Fach/Paragraphen zugeordnet werden können.
 
-    Strategie 3 – Overlap für Fließtext (Kontext-Kontinuität):
+    Strategie 3 – Overlap + Header für Fließtext (Kontext-Kontinuität):
       Wenn ein Chunk voll ist und ein neuer beginnt, wird der letzte Satz
-      des alten Chunks an den Anfang des neuen kopiert.
-      So geht bei Fragen die über Chunk-Grenzen gehen kein Kontext verloren.
-      Beispiel: "...ist im dritten Semester." | "Im dritten Semester..."
+      des alten Chunks an den Anfang des neuen kopiert (Overlap). Beim
+      Abschließen (flush) wird dem gespeicherten Chunk außerdem der aktuell
+      gültige Sektions-Header vorangestellt – sofern er nicht bereits im
+      Chunk-Text enthalten ist. So trägt jeder Fließtext-Chunk den Kontext
+      seines Paragraphen, egal wie weit er vom Header-Satz entfernt liegt.
+
+    HEADING-WECHSEL-LOGIK:
+      Sobald eine neue Überschrift erkannt wird (§-Paragraph oder Dezimalnummer),
+      wird der bisherige Chunk sofort mit dem ALTEN Header abgeschlossen (flush),
+      bevor current_heading überschrieben wird. Dadurch landet kein Chunk
+      in der falschen Sektion und es gibt keine "Mischchunks" über Sektionsgrenzen.
 
     PARAMETER:
-      chunk_size: 600 Zeichen ≈ 90-100 Wörter ≈ gut für E5-Embedding-Modell
-      overlap:    150 Zeichen ≈ 1-2 Sätze als Kontext-Überlapp
+      chunk_size: 600 Zeichen ≈ 90–100 Wörter ≈ optimal für multilingual-e5-base.
+                  Größere Werte verwässern den Embedding-Vektor (zu viele Themen).
+                  Kleinere Werte verlieren den Kontext.
+      overlap:    150 Zeichen ≈ 1–2 Sätze als Kontext-Brücke beim harten Schnitt
+                  langer Einzelsätze.
 
-    :param text:       Rohtext (wird intern automatisch durch clean_text() bereinigt)
-    :param chunk_size: Maximale Zeichenanzahl pro Chunk (Standard: 600)
-    :param overlap:    Zeichenanzahl für Überlapp bei harten Schnitten (Standard: 150)
-    :returns:          Liste von Chunk-Strings, bereit für EmbeddingService
+    :param text:       Rohtext aus extract_page_content() / pipeline.py.
+                       Wird intern durch clean_text() bereinigt (idempotent).
+    :param chunk_size: Maximale Zeichenanzahl pro Chunk (Standard: 600).
+    :param overlap:    Zeichenanzahl Überlapp beim Zerteilen langer Einzelsätze
+                       (Standard: 150).
+    :returns:          Liste von Chunk-Strings im Format:
+                         "[§ N Sektionsname]\n<Inhalt>"
+                       bereit für EmbeddingService.embed_texts().
     """
     # Zuerst bereinigen (clean_text() ist idempotent – doppelter Aufruf schadet nicht)
     text = clean_text(text)
@@ -184,7 +205,7 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 150) -> List[str
     if not text.strip():
         return []
 
-    # ── Schritt 1: Text in Tabellen- und Text-Segmente aufteilen ─────────────
+    # ── Schritt 1: Text in Tabellen- und Fließtext-Segmente aufteilen ─────────
     # Regex erkennt Blöcke von aufeinanderfolgenden Markdown-Tabellenzeilen.
     # Eine Tabellenzeile beginnt immer mit "|" und endet mit "\n".
     # Beispiel: "| Fach | ECTS |\n| --- | --- |\n| Mathematik | 4 |\n"
@@ -197,20 +218,157 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 150) -> List[str
     last_end = 0
 
     for m in table_re.finditer(text):
-        # Text VOR dieser Tabelle (falls vorhanden)
         if m.start() > last_end:
             segments.append((False, text[last_end:m.start()]))
-        # Die Tabelle selbst
         segments.append((True, m.group().strip()))
         last_end = m.end()
 
-    # Restlicher Text NACH der letzten Tabelle (oder ganzer Text wenn keine Tabelle)
     if last_end < len(text):
         segments.append((False, text[last_end:]))
 
     chunks: List[str] = []
-    current_chunk = ""      # Aktuell aufgebauter, noch nicht gespeicherter Chunk
-    current_heading = ""    # Zuletzt gesehene Kapitelüberschrift (für Tabellen-Lead-in)
+    current_chunk = ""   # Aktuell aufgebauter, noch nicht gespeicherter Chunk
+    current_heading = "" # Zuletzt erkannte Kapitelüberschrift
+
+    def flush() -> None:
+        """
+        Schließt den aktuellen Chunk ab, stellt den Sektions-Header voran
+        und speichert ihn in der chunks-Liste.
+
+        Der Header wird nur vorangestellt, wenn er nicht bereits am Anfang
+        des Chunk-Textes steht – das verhindert doppelte Header bei Chunks,
+        die direkt mit dem Überschrifts-Satz beginnen.
+        Anschließend wird current_chunk zurückgesetzt.
+        """
+        nonlocal current_chunk
+        if current_chunk.strip():
+            content = current_chunk.strip()
+            # Sektions-Header voranstellen, sofern noch nicht enthalten
+            if current_heading and not content.startswith(current_heading):
+                content = f"[{current_heading}]\n{content}"
+            chunks.append(content)
+        current_chunk = ""
+
+    def get_last_sentence(text_block: str) -> str:
+        """
+        Extrahiert den letzten vollständigen Satz aus einem Textblock.
+
+        Wird als "Lead-in" vor Tabellenblöcken verwendet: Der letzte Satz
+        des vorherigen Chunks erklärt typischerweise, worum es in der
+        folgenden Tabelle geht (z.B. "Die Pflichtfächer des 2. Semesters sind:").
+
+        :param text_block: Beliebiger Textblock.
+        :returns:          Letzter Satz ohne abschließende Leerzeichen.
+        """
+        sentences = re.split(r'(?<=[.!?]) +', text_block.strip())
+        return sentences[-1].strip() if sentences else ""
+
+    # ── Schritt 2 & 3: Segmente der Reihe nach verarbeiten ───────────────────
+    for is_table, segment in segments:
+
+        if is_table:
+            # ════════════════════════════════════════════════════════════════
+            # STRATEGIE 1 & 2: Tabellenblock-Verarbeitung
+            # ════════════════════════════════════════════════════════════════
+
+            # Tabelle passt noch in den laufenden Chunk → einfach anhängen
+            if current_chunk and len(current_chunk) + len(segment) + 2 <= chunk_size:
+                current_chunk += "\n\n" + segment + "\n\n"
+            else:
+                # Tabelle passt nicht mehr → neuen Chunk starten.
+                # Lead-in: Letzten Satz des aktuellen Chunks extrahieren,
+                # damit der Tabellen-Chunk seinen thematischen Kontext kennt.
+                lead_in = get_last_sentence(current_chunk) if current_chunk.strip() else ""
+
+                # Aktuellen Chunk mit dem bisherigen Header abschließen
+                flush()
+
+                # Tabellen-Chunk zusammenbauen:
+                # [Header (optional)] + [Lead-in-Satz (optional)] + [Tabelle]
+                table_parts = []
+                if current_heading:
+                    table_parts.append(f"[{current_heading}]")
+                if lead_in:
+                    table_parts.append(lead_in)
+                table_parts.append(segment)
+
+                # WICHTIG: chunk_size wird für Tabellen bewusst NICHT erzwungen!
+                # Eine halbierte Tabelle ist wertloser als ein zu großer Chunk.
+                chunks.append("\n\n".join(table_parts))
+
+        else:
+            # ════════════════════════════════════════════════════════════════
+            # STRATEGIE 3: Fließtext-Verarbeitung mit Overlap + Header
+            # ════════════════════════════════════════════════════════════════
+
+            # Kapitelüberschrift aus dem Segment erkennen (erste 8 Zeilen).
+            # Erkannte Muster:
+            #   § 5 Einführung in Wirtschaftsinformatik  → §-Paragraph
+            #   2.1 Pflichtfächer                        → Dezimalnummer
+            #   STUDIENPLAN WIRTSCHAFTSINFORMATIK        → Vollständige Großbuchstaben
+            for line in segment.splitlines()[:8]:
+                line = line.strip()
+                if not line:
+                    continue
+                if (line == line.upper() and len(line) > 5 and not line.isdigit()) or \
+                   re.match(r'^(§\s*\d+[a-z]?|\d+\.(\d+\.)*)\s+\S', line):
+                    # Heading-Wechsel: alten Chunk mit altem Header abschließen,
+                    # BEVOR current_heading überschrieben wird. So landet kein
+                    # Chunk irrtümlich unter dem falschen Paragraphen.
+                    if line != current_heading:
+                        flush()
+                        current_heading = line
+                    break
+
+            # Text an Satzgrenzen aufteilen.
+            # (?<=[.!?]) ist ein "Lookbehind": splittet NACH dem Satzzeichen,
+            # lässt das Satzzeichen aber beim vorherigen Element.
+            sentences = re.split(r'(?<=[.!?]) +', segment)
+
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+
+                # Einzelner Satz länger als chunk_size (seltener Grenzfall):
+                # Hart an Wortgrenzen zerschneiden. Jedes Teilstück bekommt
+                # den aktuellen Header vorangestellt.
+                if len(sentence) > chunk_size:
+                    flush()
+                    i = 0
+                    while i < len(sentence):
+                        end = min(i + chunk_size, len(sentence))
+                        if end < len(sentence):
+                            space_pos = sentence.rfind(' ', i, end)
+                            if space_pos > i:
+                                end = space_pos
+                        part = sentence[i:end].strip()
+                        if current_heading:
+                            part = f"[{current_heading}]\n{part}"
+                        chunks.append(part)
+                        i = end
+                    continue
+
+                if len(current_chunk) + len(sentence) + 1 <= chunk_size:
+                    # Satz passt in den aktuellen Chunk → anhängen
+                    current_chunk += sentence + " "
+                else:
+                    # Chunk ist voll → OVERLAP-MECHANISMUS:
+                    # Letzten Satz des aktuellen Chunks als Kontext-Brücke
+                    # an den Anfang des nächsten Chunks stellen.
+                    overlap_text = get_last_sentence(current_chunk) + " "
+                    flush()
+                    if len(overlap_text) + len(sentence) <= chunk_size:
+                        current_chunk = overlap_text + sentence + " "
+                    else:
+                        # Overlap alleine schon zu groß → direkt mit neuem Satz beginnen
+                        current_chunk = sentence + " "
+
+    # Letzten offenen Chunk nicht vergessen!
+    flush()
+
+    # Sicherheits-Filter: Leere Strings entfernen
+    return [c for c in chunks if c.strip()]
 
     def flush() -> None:
         """

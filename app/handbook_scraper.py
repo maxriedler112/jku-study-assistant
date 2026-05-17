@@ -285,6 +285,8 @@ def _batch_insert_chunks(
             "embedding":   vector,
             "chunk_index": chunk_offset + i,
             "metadata": {
+
+                "source_type": chunk_type,
                 "source_url":  src,
                 "chunk_index": chunk_offset + i,
                 "chunk_type":  chunk_type,
