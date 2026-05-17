@@ -1,0 +1,82 @@
+[
+    
+  {
+    "code":   "033/526",
+    "name":   "Wirtschaftsinformatik",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1193?lang=de"
+  },
+
+  {
+    "code":   "033/515",
+    "name":   "Betriebswirtschaftslehre",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1156?lang=de"
+  },
+
+  {
+    "code":   "033/514",
+    "name":   "International Business Administration",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1189?lang=de"
+  },
+
+  {
+    "code":   "033/317",
+    "name":   "Kulturwissenschaften",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1190?lang=de"
+  },
+
+  {
+    "code":   "033/572",
+    "name":   "Wirtschaftswissenschaften",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1194?lang=de"
+  },
+
+  {
+    "code":   "033/528",
+    "name":   "Sozialwirtschaft",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1195?lang=de"
+  },
+
+
+
+  {
+    "code":   "066/994",
+    "name":   "Sozialwirtschaft",
+    "degree": "Master",
+    "url":    "https://studienhandbuch.jku.at/curr/1196"
+  },
+
+  {
+    "code":   "066/926",
+    "name":   "Wirtschaftsinformatik",
+    "degree": "Master",
+    "url":    "https://studienhandbuch.jku.at/curr/1199?lang=de"
+  },
+
+  {
+    "code":   "066/979",
+    "name":   "Finance and Accounting",
+    "degree": "Master",
+    "url":    "https://studienhandbuch.jku.at/curr/1198?lang=de"
+  },
+  
+  {
+    "code":   "066/973",
+    "name":   "Management",
+    "degree": "Master",
+    "url":    "https://studienhandbuch.jku.at/curr/1197?lang=de"
+  },
+
+  {
+    "code":   "066/904",
+    "name":   "Psychologie (Schwerpunkt Technologie und Wirtschaft)",
+    "degree": "Master",
+    "url":    "https://studienhandbuch.jku.at/curr/1221?lang=de"
+  }
+
+]

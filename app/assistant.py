@@ -117,6 +117,12 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
         else "Keine relevanten Informationen gefunden."
     )
 
+    context_text = (
+    "\n\n".join(context_parts)
+    if context_parts
+    else "Keine relevanten Informationen in der Wissensdatenbank gefunden."
+)
+
     system_prompt = f"""Du bist ein hilfreicher Studien-Assistent für die JKU (Johannes Kepler Universität).
 Nutze NUR den unten stehenden Kontext, um die Frage des Nutzers zu beantworten.
 Wenn die Antwort nicht im Kontext steht, sage höflich, dass du das nicht weißt.
