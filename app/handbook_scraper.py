@@ -1,0 +1,426 @@
+"""
+handbook_scraper.py – Zweistufiger Admin-Scraper für das JKU Studienhandbuch.
+==============================================================================
+
+SCRAPING-STRATEGIE (zweistufig):
+---------------------------------
+Stufe 1 – Übersichtsseite (z.B. /curr/1193):
+  • Enthält die komplette Modulstruktur als Tabelle (Modulname, ECTS, LV-Typ)
+  • Extrahiert alle LVA-Links (Format: studienhandbuch.jku.at/XXXXXX)
+
+Stufe 2 – Jede LVA-Detailseite (z.B. /188056):
+  • Lernergebnisse, Kompetenzen, Fertigkeiten, Kenntnisse
+  • Beurteilungskriterien, Lehrmethoden, Literatur
+  • ECTS, Semesterstunden, Abhaltungssprache, Teilungsziffer
+
+Ergebnis: statt 12 Chunks (nur Übersicht) → hunderte Chunks mit echtem Inhalt
+
+MANIFEST-FORMAT (data/handbooks.json):
+  [
+    {
+      "code":   "033/526",
+      "name":   "Wirtschaftsinformatik",
+      "degree": "Bachelor",
+      "url":    "https://studienhandbuch.jku.at/curr/1193?lang=de"
+    }
+  ]
+
+Abhängigkeiten: pip install requests beautifulsoup4 python-dotenv supabase
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+from typing import Optional
+
+import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from supabase import create_client, Client
+
+from chunking import chunk_text
+from embeddings import EmbeddingService
+from pipeline import get_or_create_study_program, supabase as _pipeline_supabase
+
+load_dotenv()
+
+MANIFEST_PATH   = "data/handbooks.json"
+REQUEST_DELAY   = 1.0
+REQUEST_TIMEOUT = 20
+CHUNK_TABLE     = "chunks"
+BASE_URL        = "https://studienhandbuch.jku.at"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (compatible; JKU-StudyAssistant/1.0; "
+        "educational-bot; +https://github.com/jku-study-assistant)"
+    ),
+    "Accept-Language": "de,en;q=0.9",
+}
+
+supabase: Client = _pipeline_supabase
+
+
+# ===============================================================================
+# STUFE 1 - UEBERSICHTSSEITE
+# ===============================================================================
+
+def fetch_html(url: str) -> Optional[str]:
+    """Laedt eine URL und gibt das rohe HTML zurueck. None bei Fehler."""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return resp.text
+    except requests.RequestException as e:
+        print(f"    Fehler beim Laden von {url}: {e}")
+        return None
+
+
+def extract_lva_links(html: str) -> list[str]:
+    """
+    Extrahiert alle LVA-Detailseiten-Links aus der Uebersichtsseite.
+    LVA-Links haben das Format: https://studienhandbuch.jku.at/XXXXXX
+    wobei XXXXXX eine reine Zahl ist (z.B. /188056).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    lva_urls: set[str] = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if re.match(r'^https?://studienhandbuch\.jku\.at/\d+$', href):
+            lva_urls.add(href)
+        elif re.match(r'^/\d+$', href):
+            lva_urls.add(f"{BASE_URL}{href}")
+
+    return sorted(lva_urls)
+
+
+def extract_overview_text(html: str, program_name: str) -> str:
+    """
+    Extrahiert den Strukturtext der Uebersichtsseite (Modulbaum + ECTS-Tabelle).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup.select("nav, header, footer, script, style, .menu, "
+                           "#sidebar, .breadcrumb, form"):
+        tag.decompose()
+
+    content_table = soup.find("table", recursive=True)
+    if not content_table:
+        return ""
+
+    rows = []
+    for tr in content_table.find_all("tr"):
+        cells = [td.get_text(separator=" ", strip=True) for td in tr.find_all(["td", "th"])]
+        cells = [c for c in cells if c]
+        if cells:
+            rows.append(" | ".join(cells))
+
+    if not rows:
+        return ""
+
+    return f"STUDIENPLAN {program_name.upper()}\n\n" + "\n".join(rows)
+
+
+# ===============================================================================
+# STUFE 2 - LVA-DETAILSEITEN
+# ===============================================================================
+
+def extract_lva_text(html: str, url: str) -> str:
+    """
+    Extrahiert den vollstaendigen Inhalt einer LVA-Detailseite als strukturierten Text.
+
+    Erfasste Felder:
+      - LV-Code und Name, ECTS, Ausbildungslevel, Semesterstunden
+      - Studienfachbereich, Verantwortliche/r, Abhaltungssprache
+      - Lernergebnisse, Kompetenzen, Fertigkeiten, Kenntnisse
+      - Beurteilungskriterien, Lehrmethoden, Literatur
+      - Teilungsziffer, Zuteilungsverfahren
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup.select("nav, header, footer, script, style, form, "
+                           ".menu, #sidebar, .breadcrumb"):
+        tag.decompose()
+
+    parts: list[str] = []
+
+    # LV-Titel aus dem Seitentitel
+    title_tag = soup.find("title")
+    if title_tag:
+        title = title_tag.get_text(strip=True).replace("Studienhandbuch | ", "").strip()
+        if title:
+            parts.append(f"LEHRVERANSTALTUNG: {title}")
+
+    # Breadcrumb fuer Kontext (Studiengang -> Modul -> LVA)
+    breadcrumb_links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "/curr/" in href or (re.search(r'/\d+$', href) and "studienhandbuch" in href):
+            text = a.get_text(strip=True)
+            if text and len(text) > 3:
+                breadcrumb_links.append(text)
+
+    if breadcrumb_links:
+        parts.append("Zugehoerigkeit: " + " -> ".join(breadcrumb_links[:4]))
+
+    # Alle Tabellen durchsuchen
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        for row in rows:
+            cells = row.find_all(["td", "th"])
+            if not cells:
+                continue
+
+            if len(cells) == 2:
+                label = cells[0].get_text(separator=" ", strip=True)
+                value = cells[1].get_text(separator=" ", strip=True)
+
+                if not label or not value or len(value) < 2:
+                    continue
+                if label.lower() in ("version", "versionsauswahl", ""):
+                    continue
+
+                parts.append(f"{label}: {value}")
+
+            elif len(cells) > 2:
+                row_text = " | ".join(
+                    c.get_text(separator=" ", strip=True)
+                    for c in cells
+                    if c.get_text(strip=True)
+                )
+                if row_text and len(row_text) > 10:
+                    parts.append(row_text)
+
+    # Listenelemente (Lernziele als Bullet Points)
+    for ul in soup.find_all(["ul", "ol"]):
+        items = []
+        for li in ul.find_all("li", recursive=False):
+            text = li.get_text(separator=" ", strip=True)
+            if text and len(text) > 10:
+                items.append(f"- {text}")
+        if items:
+            parts.append("\n".join(items))
+
+    return "\n\n".join(filter(None, parts))
+
+
+# ===============================================================================
+# SUPABASE
+# ===============================================================================
+
+INSERT_BATCH_SIZE = 50   # Rows pro INSERT-Request (Supabase-Limit: ~500, konservativ)
+
+def _chunks_exist_for_program(study_program_id: str) -> bool:
+    """Prueft ob fuer diesen Studiengang bereits Chunks vorhanden sind."""
+    result = (
+        supabase.table("documents")
+        .select("id")
+        .eq("study_program_id", study_program_id)
+        .eq("status", "processed")
+        .execute()
+    )
+    return len(result.data) > 0
+
+
+def _create_document(study_program_id: str, source_label: str) -> str:
+    """Legt einen Dokument-Eintrag an und gibt die ID zurueck."""
+    doc_result = supabase.table("documents").insert({
+        "user_id":          None,
+        "filename":         source_label,
+        "bucket_path":      None,
+        "study_program_id": study_program_id,
+        "status":           "processing",
+    }).execute()
+    return doc_result.data[0]["id"]
+
+
+def _batch_insert_chunks(
+    chunks:      list[str],
+    embeddings:  list[list[float]],
+    sources:     list[str],
+    document_id: str,
+    chunk_type:  str,
+    chunk_offset: int,
+) -> int:
+    """
+    Speichert Chunks in Batches statt einzeln.
+
+    Einzelne INSERTs bei 4000+ Chunks fuehren zu Server-Disconnects.
+    Batch-INSERTs reduzieren die Anzahl der Requests um Faktor INSERT_BATCH_SIZE.
+
+    :returns: Anzahl erfolgreich gespeicherter Chunks
+    """
+    total_saved = 0
+    rows = [
+        {
+            "document_id": document_id,
+            "content":     chunk,
+            "embedding":   vector,
+            "chunk_index": chunk_offset + i,
+            "metadata": {
+                "source_url":  src,
+                "chunk_index": chunk_offset + i,
+                "chunk_type":  chunk_type,
+                "has_table":   "|" in chunk,
+            },
+        }
+        for i, (chunk, vector, src) in enumerate(zip(chunks, embeddings, sources))
+    ]
+
+    for batch_start in range(0, len(rows), INSERT_BATCH_SIZE):
+        batch = rows[batch_start : batch_start + INSERT_BATCH_SIZE]
+        try:
+            supabase.table(CHUNK_TABLE).insert(batch).execute()
+            total_saved += len(batch)
+        except Exception as e:
+            print(f"      Batch {batch_start//INSERT_BATCH_SIZE + 1} Fehler: {e}")
+            # Einzeln versuchen um so viele wie moeglich zu retten
+            for row in batch:
+                try:
+                    supabase.table(CHUNK_TABLE).insert(row).execute()
+                    total_saved += 1
+                except Exception:
+                    pass
+
+    return total_saved
+
+
+# ===============================================================================
+# HAUPT-ORCHESTRIERUNG
+# ===============================================================================
+
+def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
+    """
+    Scrapt einen Studiengang zweistufig und speichert alle Chunks in Supabase.
+
+    ABLAUF:
+      1. Studiengang anlegen (get_or_create) + Duplikat-Check
+      2. Dokument-Eintrag anlegen
+      3. Uebersichtsseite laden -> Text + LVA-Links extrahieren
+      4. Uebersichtstext chunken + embedden + speichern
+      5. Jede LVA-Detailseite laden -> Text extrahieren
+      6. Alle LVA-Texte gesammelt chunken + embedden + speichern
+      7. Dokument-Status -> "processed"
+    """
+    code    = entry["code"]
+    name    = entry["name"]
+    degree  = entry.get("degree")
+    url     = entry["url"]
+    source_label = f"handbook_{code.replace('/', '-')}"
+
+    print(f"\n📚 Verarbeite: {code} - {name} ({degree or 'unbekannt'})")
+
+    program_id = get_or_create_study_program(code, name, degree)
+
+    if _chunks_exist_for_program(program_id):
+        print(f"   Bereits vorhanden - ueberspringe.")
+        return 0
+
+    document_id = _create_document(program_id, source_label)
+
+    try:
+        total_saved  = 0
+        chunk_offset = 0
+
+        # Stufe 1: Uebersichtsseite
+        print(f"   Lade Uebersichtsseite...")
+        overview_html = fetch_html(url)
+        if not overview_html:
+            raise ValueError(f"Uebersichtsseite nicht erreichbar: {url}")
+
+        lva_urls = extract_lva_links(overview_html)
+        print(f"   {len(lva_urls)} LVA-Detailseiten gefunden.")
+
+        overview_text = extract_overview_text(overview_html, name)
+        if overview_text.strip():
+            ov_chunks     = chunk_text(overview_text)
+            ov_embeddings = embed_service.embed_texts(ov_chunks)
+            saved = _batch_insert_chunks(
+                ov_chunks, ov_embeddings, [url] * len(ov_chunks),
+                document_id, "overview", chunk_offset,
+            )
+            total_saved  += saved
+            chunk_offset += len(ov_chunks)
+            print(f"   Uebersicht: {saved} Chunks gespeichert.")
+
+        # Stufe 2: LVA-Detailseiten
+        print(f"   Scrape {len(lva_urls)} LVA-Seiten...")
+
+        all_lva_chunks:  list[str] = []
+        all_lva_sources: list[str] = []
+
+        for i, lva_url in enumerate(lva_urls, 1):
+            time.sleep(REQUEST_DELAY)
+            lva_html = fetch_html(lva_url)
+            if not lva_html:
+                continue
+
+            lva_text = extract_lva_text(lva_html, lva_url)
+            if lva_text.strip() and len(lva_text) > 100:
+                chunks = chunk_text(lva_text)
+                all_lva_chunks.extend(chunks)
+                all_lva_sources.extend([lva_url] * len(chunks))
+
+            if i % 20 == 0:
+                print(f"      {i}/{len(lva_urls)} LVAs geladen...")
+
+        if all_lva_chunks:
+            print(f"   Generiere Embeddings fuer {len(all_lva_chunks)} LVA-Chunks...")
+            lva_embeddings = embed_service.embed_texts(all_lva_chunks)
+            saved = _batch_insert_chunks(
+                all_lva_chunks, lva_embeddings, all_lva_sources,
+                document_id, "lva_detail", chunk_offset,
+            )
+            total_saved += saved
+            print(f"   LVA-Chunks: {saved}/{len(all_lva_chunks)} gespeichert.")
+
+        supabase.table("documents").update({"status": "processed"}).eq("id", document_id).execute()
+        print(f"   Fertig: {total_saved} Chunks gespeichert ({len(lva_urls)} LVAs).")
+        return total_saved
+
+    except Exception as e:
+        supabase.table("documents").update({"status": "error"}).eq("id", document_id).execute()
+        print(f"   Fehler: {e}")
+        raise
+
+
+def run_scraper(manifest_path: str = MANIFEST_PATH) -> None:
+    """Liest das Manifest und scrapt alle darin aufgefuehrten Studienganege."""
+    if not os.path.exists(manifest_path):
+        print(f"Manifest nicht gefunden: {manifest_path}")
+        return
+
+    with open(manifest_path, encoding="utf-8") as f:
+        entries = json.load(f)
+
+    if not entries:
+        print("Manifest ist leer.")
+        return
+
+    print(f"Starte Scraping fuer {len(entries)} Studiengaenge...")
+    embed_service = EmbeddingService()
+
+    total_chunks  = 0
+    success_count = 0
+    error_count   = 0
+
+    for entry in entries:
+        try:
+            n = scrape_program(entry, embed_service)
+            total_chunks  += n
+            success_count += 1
+        except Exception as e:
+            print(f"   FEHLER bei {entry.get('name')}: {e}")
+            error_count += 1
+
+    print("\n" + "=" * 60)
+    print(f"Fertig! {success_count} erfolgreich, {error_count} Fehler.")
+    print(f"Gesamt: {total_chunks} Chunks in Supabase gespeichert.")
+
+
+if __name__ == "__main__":
+    run_scraper()

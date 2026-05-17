@@ -158,6 +158,20 @@ def table_to_markdown(table: list) -> str:
     # ── Markdown-Tabelle zusammenbauen ────────────────────────────────────────
     rows = ["| " + " | ".join(row) + " |" for row in filled_table]
 
+    filled_table = []
+    for row in table:
+        new_row = []
+        for col_idx in range(num_cols):
+            raw_cell = row[col_idx] if col_idx < len(row) else None
+            val = str(raw_cell or "").replace("\n", " ").strip()
+            if val:
+                last_values[col_idx] = val
+            else:
+                val = last_values[col_idx]
+            new_row.append(val)
+        filled_table.append(new_row)
+
+    rows = ["| " + " | ".join(row) + " |" for row in filled_table]
     if not rows:
         return ""
 
@@ -165,7 +179,6 @@ def table_to_markdown(table: list) -> str:
     # Das ist Standard-Markdown-Tabellenformat, das viele LLMs verstehen.
     separator = "| " + " | ".join(["---"] * num_cols) + " |"
     rows.insert(1, separator)
-
     return "\n".join(rows)
 
 
@@ -210,6 +223,9 @@ def detect_two_column_layout(page) -> bool:
     # Zweispaltig wenn beide Seiten mindestens 30% der Wörter haben
     return left_ratio >= 0.30 and right_ratio >= 0.30
 
+def _extract_column_content(col_page) -> str:
+    """Extrahiert Text und Tabellen aus einem zugeschnittenen Spalten-Bereich."""
+    return _extract_regions(col_page)
 
 def _extract_column_content(col_page) -> str:
     """
@@ -425,7 +441,6 @@ def erkennen_abschlussart(pdf_bytes: bytes) -> Optional[str]:
 
     text = ""
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        # Nur die ersten 5 Seiten prüfen – Abschlussart steht meist im Titel
         for page in pdf.pages[:5]:
             text += (page.extract_text() or "") + "\n"
 
@@ -439,7 +454,6 @@ def erkennen_abschlussart(pdf_bytes: bytes) -> Optional[str]:
         "Lehramt":  len(re.findall(r'\blehramt\b', text_lower)),
         "Doktorat": len(re.findall(r'\bdoktorat\b|\bphd\b', text_lower)),
     }
-
     bester = max(kandidaten, key=kandidaten.get)
     return bester if kandidaten[bester] > 0 else None
 
@@ -463,7 +477,6 @@ def get_or_create_study_program(code: str, name: str, degree_type: Optional[str]
         # Studiengang existiert bereits → UUID zurückgeben
         return result.data[0]["id"]
 
-    # Studiengang existiert noch nicht → neu anlegen
     row = {"code": code, "name": name}
     if degree_type:
         row["degree_type"] = degree_type
@@ -500,7 +513,8 @@ def document_exists(filename: str, study_program_id: str) -> bool:
 
 def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id: str) -> int:
     """
-    Verarbeitet ein PDF vollständig und speichert alle Daten in Supabase.
+    Verarbeitet ein Curriculum-PDF vollständig und speichert alle Daten in Supabase.
+    NUR für Admin-Nutzung – normale User haben keinen Zugriff auf diese Funktion.
 
     Dies ist die zentrale Funktion der ETL-Pipeline. Sie orchestriert alle
     Teilschritte und sorgt für eine konsistente Fehlerbehandlung:
@@ -540,7 +554,6 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
     """
     import pdfplumber
 
-    # ── Schritt 1: Duplikat-Check ────────────────────────────────────────────
     if document_exists(filename, study_program_id):
         raise ValueError(f"'{filename}' wurde für diesen Studiengang bereits hochgeladen.")
 
@@ -549,7 +562,7 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
     # da Schrägstriche in Storage-Pfaden als Ordner-Trennzeichen gelten.
     program = supabase.table("study_programs").select("code").eq("id", study_program_id).execute()
     program_code = program.data[0]["code"].replace("/", "-") if program.data else "allgemein"
-    bucket_path = f"{program_code}/{filename}"   # z.B. "033-526/curriculum_wi.pdf"
+    bucket_path  = f"{program_code}/{filename}"
 
     # ── Schritt 3: PDF in Supabase Storage hochladen ─────────────────────────
     # "upsert: true" überschreibt eine vorhandene Datei mit gleichem Pfad.
@@ -592,7 +605,6 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
                 # Text + Tabellen in der richtigen Leserichtung extrahieren.
                 # Diese Funktion erkennt auch zweispaltige Layouts automatisch.
                 combined = extract_page_content(page)
-
                 if not combined.strip():
                     continue   # Leere Seiten überspringen (z.B. Deckblatt ohne Text)
 
@@ -626,7 +638,7 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
         # Batch-Verarbeitung ist deutlich effizienter als einzelne API-Aufrufe.
         # Das E5-Modell erzeugt 768-dimensionale Vektoren pro Chunk.
         embed_service = EmbeddingService()
-        embeddings = embed_service.embed_texts([c["content"] for c in chunks_with_meta])
+        embeddings    = embed_service.embed_texts([c["content"] for c in chunks_with_meta])
 
         # ── Schritt 8: Chunks + Metadaten in Supabase speichern ──────────────
         for i, (chunk_meta, vector) in enumerate(zip(chunks_with_meta, embeddings)):
@@ -661,9 +673,13 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
     return len(chunks_with_meta)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# USER-PIPELINE: ICS-Kalender
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def process_ics(ics_bytes: bytes, filename: str, user_id: str) -> int:
     """
-    Verarbeitet eine ICS-Kalender-Datei und speichert die Events in Supabase.
+    Verarbeitet eine KUSSS-ICS-Datei und speichert Events in der `events`-Tabelle.
 
     ICS (iCalendar) ist das Standardformat für Kalender-Exports, z.B. von
     KUSSS (JKU Stundenplan-Export). Diese Funktion ermöglicht es, auch
