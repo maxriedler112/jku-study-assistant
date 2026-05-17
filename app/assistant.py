@@ -25,13 +25,18 @@ def _is_valid_user_id(user_id: str) -> bool:
     """JKU Matrikelnummer: optionales 'k' + 7-8 Ziffern."""
     return bool(user_id and re.match(r'^k?\d{7,8}$', user_id.strip()))
 
+
 TIME_KEYWORDS = [
+    'heute', 'morgen', 'uebermorgen',
+    'diese woche', 'naechste woche', 'kommende woche',
+    'wann', 'termin', 'termine', 'pruefung', 'klausur',
+    'ansteht', 'steht an', 'naechster', 'naechste', 'stundenplan',
+    'vorlesung', 'lehrveranstaltung',
     'heute', 'morgen', 'übermorgen',
     'diese woche', 'nächste woche', 'kommende woche',
-    'wann', 'termin', 'termine', 'prüfung', 'klausur',
-    'ansteht', 'steht an', 'nächster', 'nächste', 'stundenplan',
-    'vorlesung', 'lehrveranstaltung',
+    'prüfung', 'nächster', 'nächste',
 ]
+
 
 def is_time_based(question: str) -> bool:
     q = question.lower()
@@ -42,7 +47,7 @@ def get_date_range(question: str):
     q = question.lower()
     today = date.today()
 
-    if 'nächste woche' in q or 'kommende woche' in q:
+    if 'nächste woche' in q or 'kommende woche' in q or 'naechste woche' in q:
         days_until_monday = (7 - today.weekday()) % 7 or 7
         start = today + timedelta(days=days_until_monday)
         end = start + timedelta(days=6)
@@ -56,7 +61,6 @@ def get_date_range(question: str):
         start = today
         end = today
     else:
-        # Allgemeine Termin-Frage: nächste 4 Wochen
         start = today
         end = today + timedelta(days=28)
 
@@ -84,7 +88,7 @@ def query_events(question: str, user_id: str) -> str:
     lines = []
     for ev in response.data:
         dt = datetime.fromisoformat(ev["start_dt"]).strftime("%d.%m.%Y %H:%M")
-        line = f"- {dt}: {ev.get('course_type','')} {ev['course_name']}"
+        line = f"- {dt}: {ev.get('course_type', '')} {ev['course_name']}"
         if ev.get("event_type"):
             line += f" [{ev['event_type']}]"
         if ev.get("location"):
@@ -98,8 +102,8 @@ def query_events(question: str, user_id: str) -> str:
 
 def _is_list_question(question: str) -> bool:
     """
-    Erkennt ob eine Frage eine vollständige Liste erwartet
-    (Kurse, Fächer, LVAs, etc.) statt einer kurzen Erklärung.
+    Erkennt ob eine Frage eine vollstaendige Liste erwartet
+    (Kurse, Faecher, LVAs, Semester etc.) statt einer kurzen Erklaerung.
     """
     list_keywords = [
         "welche kurse", "welche fächer", "welche lehrveranstaltungen",
@@ -107,48 +111,78 @@ def _is_list_question(question: str) -> bool:
         "auflistung", "überblick", "was gibt es", "steop kurse",
         "pflichtfächer", "wahlfächer", "freifächer",
         "welche vorlesungen", "welche übungen",
+        "1. semester", "2. semester", "3. semester",
+        "erstes semester", "zweites semester", "drittes semester",
+        "pflichtmodule", "grundlagen", "welche module",
     ]
     q_lower = question.lower()
     return any(kw in q_lower for kw in list_keywords)
 
 
+def _is_full_curriculum_question(question: str) -> bool:
+    keywords = [
+        "alle fächer", "alle kurse", "alle lehrveranstaltungen",
+        "welche fächer hat", "welche kurse hat", "vollständige liste",
+        "gesamte studium", "ganzes studium", "komplette liste",
+        "was hat das studium", "was umfasst das studium",
+    ]
+    return any(kw in question.lower() for kw in keywords)
+
 def ask_assistant(question: str, user_id: str = None, study_program_id: str = None) -> str:
     context_parts = []
 
-    # Zeitbasierte Frage → Kalender
+    # 1. Zeitbasierte Frage → Kalender
     if user_id and _is_valid_user_id(user_id) and is_time_based(question):
         events_text = query_events(question, user_id)
         if events_text:
-            context_parts.append(f"KALENDER-EINTRÄGE:\n{events_text}")
+            context_parts.append(f"KALENDER-EINTRAEGE:\n{events_text}")
 
-    # Listenfragen brauchen mehr Chunks
+    # 2. Listenfragen brauchen mehr Chunks
     match_count = 12 if _is_list_question(question) else 6
 
+    # 3. Vektorsuche
     results = search_jku_knowledge(
         question,
         study_program_id=study_program_id,
         match_count=match_count,
     )
 
+    # Vollständige Kurslisten: noch mehr Chunks + nur Übersichts-Chunks
+    if _is_full_curriculum_question(question):
+        match_count = 20
+
     if results:
-        # Tabellen-Chunks zuerst sortieren bei Listenfragen
+        # Tabellen-Chunks zuerst bei Listenfragen
         if _is_list_question(question):
             results.sort(key=lambda r: (
-                0 if "|" in r.get("content", "") else 1  # Tabellen vorne
+                0 if "|" in r.get("content", "") else 1
             ))
         chunks_text = "\n\n---\n\n".join([res["content"] for res in results])
         context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
 
-    system_prompt = f"""Du bist ein hilfreicher Studien-Assistent für die JKU.
-Nutze NUR den unten stehenden Kontext für deine Antwort.
+    # context_parts → fertiger String fuer den System-Prompt
+    context_text = (
+        "\n\n".join(context_parts)
+        if context_parts
+        else "Keine relevanten Informationen in der Wissensdatenbank gefunden."
+    )
+
+    system_prompt = f"""Du bist ein hilfreicher Studien-Assistent fuer die JKU.
+Nutze NUR den unten stehenden Kontext fuer deine Antwort.
+Heute ist der {date.today().strftime('%d.%m.%Y')}.
 
 WICHTIGE REGELN:
-- Bei Fragen nach Kursen, Fächern oder Lehrveranstaltungen: 
+- Bei Fragen nach Kursen, Faechern oder Lehrveranstaltungen:
   Liste ALLE im Kontext genannten auf, nicht nur die ersten.
-- Wenn Tabellen im Kontext stehen: übertrage sie vollständig als Liste.
-- Antworte auf Deutsch. Heute: {date.today().strftime('%d.%m.%Y')}.
+- Wenn Tabellen im Kontext stehen: uebertrage sie vollstaendig als Liste.
 - Wenn Informationen fehlen: sage es ehrlich.
 - Erfinde KEINE Kurse oder ECTS-Punkte.
+- Bei Fragen nach Beurteilungskriterien, Pruefungsmodalitaeten oder
+  Lehrmethoden: Suche GEZIELT nach dem Feld "Beurteilungskriterien:" 
+  im Kontext und gib dessen Inhalt direkt aus. Nicht umschreiben.
+- Bei Fragen nach spezifischen Feldern (Beurteilungskriterien, Lehrmethoden,
+  Abhaltungssprache, Teilungsziffer): Extrahiere den exakten Wert aus dem
+  Kontext ohne zu interpretieren.
 
 KONTEXT:
 {context_text}
