@@ -89,33 +89,6 @@ def fetch_html(url: str) -> Optional[str]:
         return None
 
 
-def extract_lva_links(html: str) -> list[str]:
-    """
-    Extrahiert alle LVA-Detailseiten-Links aus der Uebersichtsseite.
-    LVA-Links haben das Format: https://studienhandbuch.jku.at/XXXXXX
-    wobei XXXXXX eine reine Zahl ist (z.B. /188056).
-    """
-    soup = BeautifulSoup(html, "html.parser")
-
-    print("DEBUG table count:", len(soup.find_all("table")))
-
-    for idx, tr in enumerate(soup.find_all("tr")[:40]):
-        cells = [
-            td.get_text(separator=" ", strip=True)
-            for td in tr.find_all(["td", "th"])
-        ]
-        print(f"ROW {idx}: {cells}")
-    lva_urls: set[str] = set()
-
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        if re.match(r'^https?://studienhandbuch\.jku\.at/\d+$', href):
-            lva_urls.add(href)
-        elif re.match(r'^/\d+$', href):
-            lva_urls.add(f"{BASE_URL}{href}")
-
-    return sorted(lva_urls)
-
 
 def extract_overview_text(html: str, program_name: str) -> str:
     """
@@ -246,6 +219,22 @@ def extract_overview_rows(html: str, degree_name: str, degree_type: str):
         elif title.startswith("................"):
             course_type = first_word if first_word in course_types else None
 
+            link_tag = tr.find("a", href=True)
+            lva_url = None
+
+            if link_tag:
+                href = link_tag["href"].strip()
+
+                if href.startswith("http"):
+                    lva_url = href
+                elif href.startswith("/"):
+                    lva_url = f"{BASE_URL}{href}"
+
+            content = (
+                f"Studium: {degree_name}. Typ: {degree_type}. "
+                f"Modul: {current_module}. Gruppe: {current_group}. "
+                f"Lehrveranstaltung: {clean_title}. ECTS: {ects}."
+                        )
             content = (
                 f"Studium: {degree_name}. Typ: {degree_type}. "
                 f"Modul: {current_module}. Gruppe: {current_group}. "
@@ -262,6 +251,7 @@ def extract_overview_rows(html: str, degree_name: str, degree_type: str):
                     "course_name": current_group,
                     "course_type": course_type,
                     "lva_name": clean_title,
+                    "lva_url": lva_url,
                     "ects": ects,
                 }
             })
@@ -274,109 +264,234 @@ def extract_overview_rows(html: str, degree_name: str, degree_type: str):
 
 
 
+
 # ===============================================================================
 # STUFE 2 - LVA-DETAILSEITEN
 # ===============================================================================
 
-def extract_lva_text(html: str, url: str) -> str:
+def extract_lva_chunks(
+    html: str,
+    url: str,
+    degree_name: str,
+    degree_type: str,
+    overview_metadata: dict | None = None,
+) -> list[dict]:
     """
-    Extrahiert den Inhalt einer LVA-Detailseite sauber und ohne Duplikate.
+    Extrahiert strukturierte semantische Chunks aus einer LVA-Detailseite.
 
-    KERNPROBLEM: Das Studienhandbuch hat verschachtelte Tabellen.
-    find_all("table") + find_all("tr") durchlaeuft innere Tabellen mehrfach
-    weil die aeussere Tabelle die inneren als Kinder enthaelt.
-
-    LOESUNG: Nur direkte Kind-Rows (<tr>) jeder Tabelle verarbeiten
-    (recursive=False), und nur die innerste relevante Tabelle nutzen.
-    Zusaetzlich: seen_values Set verhindert inhaltliche Duplikate.
+    WICHTIG:
+    - Kein generisches chunk_text() mehr fuer HTML-Seiten
+    - Stattdessen direkte semantische Chunks pro Sektion
+    - Nur vorhandene Felder/Sektionen werden gespeichert
+    - Metadata aus Ebene 1 werden uebernommen
     """
+
     soup = BeautifulSoup(html, "html.parser")
 
-    # Navigation und irrelevante Elemente entfernen
-    for tag in soup.select("nav, header, footer, script, style, form, "
-                           ".menu, #sidebar, .loginbox"):
+    # Unnoetige Bereiche entfernen
+    for tag in soup.select(
+        "nav, header, footer, script, style, form, "
+        ".menu, #sidebar, .loginbox"
+    ):
         tag.decompose()
 
-    parts: list[str] = []
-    seen_values: set[str] = set()  # Verhindert inhaltliche Duplikate
+    chunks = []
 
-    def add_part(text: str) -> None:
-        """Fuegt Text nur hinzu wenn er noch nicht vorhanden ist."""
-        key = text[:80]  # Ersten 80 Zeichen als Duplikat-Schluessel
-        if key not in seen_values and len(text) > 3:
-            seen_values.add(key)
-            parts.append(text)
+    def clean(value: str) -> str:
+        return re.sub(r"\s+", " ", value or "").strip()
 
-    # ── 1. LV-Titel ──────────────────────────────────────────────────────────
-    title_tag = soup.find("title")
-    if title_tag:
-        title = title_tag.get_text(strip=True).replace("Studienhandbuch | ", "").strip()
-        if title and title != "Studienhandbuch":
-            add_part(f"LEHRVERANSTALTUNG: {title}")
+    def add_chunk(
+        section: str,
+        value: str,
+        extra_meta: dict | None = None,
+    ) -> None:
+        """
+        Fuegt nur sinnvolle/nicht-leere Chunks hinzu.
+        """
 
-    # ── 2. Breadcrumb ────────────────────────────────────────────────────────
-    breadcrumb = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "/curr/" in href or re.match(r".*studienhandbuch\.jku\.at/\d+", href):
-            text = a.get_text(strip=True)
-            if text and len(text) > 3 and text not in breadcrumb:
-                breadcrumb.append(text)
-    if breadcrumb:
-        add_part("Studiengang-Kontext: " + " > ".join(breadcrumb[:5]))
+        value = clean(value)
 
-    # ── 3. Nur direkte Kind-Rows verarbeiten (kein rekursives find_all) ──────
-    skip_labels = {
-        "versionsauswahl", "version", "inhalt", "detailinformationen",
-        "lernergebnisse", "positionsanzeige", "sprachauswahl", "sprache",
-        "menue", "seitenbereiche", "externe tools", "studienhandbuch-login",
-        "praesenzlehrveranstaltung", "", "versionsauswahl version",
-    }
-    seen_labels: set[str] = set()
+        if not value or len(value) < 3:
+            return
 
-    for table in soup.find_all("table"):
-        # Nur direkte Kind-Rows - verhindert Mehrfachverarbeitung
-        direct_rows = table.find_all("tr", recursive=False)
-        if not direct_rows:
-            # Manche Tabellen haben tbody als Zwischenschicht
-            tbody = table.find("tbody")
-            if tbody:
-                direct_rows = tbody.find_all("tr", recursive=False)
+        metadata = {
+            "study_program": degree_name,
+            "degree": degree_type,
+            "source_type": "lva_detail",
+            "source_url": url,
+            "section": section,
+        }
 
-        for row in direct_rows:
-            # Nur direkte Kind-Zellen
-            cells = row.find_all(["td", "th"], recursive=False)
-            if not cells:
-                continue
+        # Metadata aus Ebene 1 uebernehmen
+        if overview_metadata:
+            metadata.update(overview_metadata)
 
-            if len(cells) == 2:
-                label = re.sub(r"\s+", " ", cells[0].get_text()).strip()
-                value = re.sub(r"\s+", " ", cells[1].get_text()).strip()
+        # Zusatz-Metadata
+        if extra_meta:
+            metadata.update(extra_meta)
 
-                if (label and value
-                        and len(value) > 3
-                        and label.lower() not in skip_labels
-                        and label not in seen_labels):
-                    seen_labels.add(label)
-                    add_part(f"{label}: {value}")
+        lva_name = metadata.get("lva_name", "Unbekannte Lehrveranstaltung")
 
-            elif len(cells) > 2:
-                texts = [re.sub(r"\s+", " ", c.get_text()).strip() for c in cells]
-                texts = [t for t in texts if t and len(t) > 1]
-                if texts and any(kw in " ".join(texts) for kw in ["ECTS", "SSt"]):
-                    add_part("Metadaten: " + " | ".join(texts))
+        content = (
+            f"Studium: {degree_name}. "
+            f"Typ: {degree_type}. "
+            f"Lehrveranstaltung: {lva_name}. "
+            f"Abschnitt: {section}. "
+            f"{section}: {value}"
+        )
 
-    # ── 4. Listen (LO1, LO2, Literatur etc.) ─────────────────────────────────
+        chunks.append({
+            "content": content,
+            "metadata": metadata,
+        })
+
+    # ---------------------------------------------------------------------------
+    # 1. Titel extrahieren
+    # ---------------------------------------------------------------------------
+
+    title_text = ""
+
+    h1 = soup.find(["h1", "h2"])
+    if h1:
+        title_text = clean(h1.get_text(" ", strip=True))
+
+    if not title_text:
+        title_tag = soup.find("title")
+        if title_tag:
+            title_text = clean(
+                title_tag.get_text(" ", strip=True)
+                .replace("Studienhandbuch |", "")
+            )
+
+    # ---------------------------------------------------------------------------
+    # 2. Tabellenfelder sammeln
+    # ---------------------------------------------------------------------------
+
+    fields = {}
+
+    for tr in soup.find_all("tr"):
+
+        cells = tr.find_all(["td", "th"], recursive=False)
+
+        if not cells:
+            continue
+
+        # Klassische Key-Value Zeilen
+        if len(cells) == 2:
+
+            label = clean(cells[0].get_text(" ", strip=True))
+            value = clean(cells[1].get_text(" ", strip=True))
+
+            if label and value:
+                fields[label] = value
+
+        # Tabellen mit mehreren Spalten
+        elif len(cells) > 2:
+
+            texts = [
+                clean(c.get_text(" ", strip=True))
+                for c in cells
+            ]
+
+            texts = [t for t in texts if t]
+
+            if texts:
+                joined = " | ".join(texts)
+
+                if "ECTS" in joined or "SSt" in joined or "Workload" in joined:
+                    fields["Metadaten"] = joined
+
+    # ---------------------------------------------------------------------------
+    # 3. Basisinformationen-Chunk
+    # ---------------------------------------------------------------------------
+
+    basis_info = []
+
+    if title_text:
+        basis_info.append(title_text)
+
+    if "Metadaten" in fields:
+        basis_info.append(fields["Metadaten"])
+
+    if "Quellcurriculum" in fields:
+        basis_info.append(fields["Quellcurriculum"])
+
+    if basis_info:
+        add_chunk(
+            "Basisinformationen",
+            " ".join(basis_info)
+        )
+
+    # ---------------------------------------------------------------------------
+    # 4. Bekannte Sektionen
+    # ---------------------------------------------------------------------------
+
+    section_labels = [
+        "Anmeldevoraussetzungen",
+        "Quellcurriculum",
+        "Kompetenzen",
+        "Fertigkeiten",
+        "Kenntnisse",
+        "Beurteilungskriterien",
+        "Lehrmethoden",
+        "Abhaltungssprache",
+        "Kursunterlagen",
+        "Literatur",
+        "Lehrinhalte wechselnd?",
+        "Sonstige Informationen",
+        "Frühere Varianten",
+        "Teilungsziffer",
+        "Zuteilungsverfahren",
+    ]
+
+    for label in section_labels:
+
+        if label in fields:
+
+            add_chunk(
+                label,
+                fields[label]
+            )
+
+    # ---------------------------------------------------------------------------
+    # 5. Listen (LO2, Literaturpunkte, Bullet Lists...)
+    # ---------------------------------------------------------------------------
+
     for ul in soup.find_all(["ul", "ol"]):
-        items = []
-        for li in ul.find_all("li", recursive=False):
-            text = re.sub(r"\s+", " ", li.get_text()).strip()
-            if text and len(text) > 10:
-                items.append(f"- {text}")
-        if items:
-            add_part("\n".join(items))
 
-    return "\n\n".join(filter(None, parts))
+        items = []
+
+        for li in ul.find_all("li", recursive=False):
+
+            text = clean(li.get_text(" ", strip=True))
+
+            if text and len(text) > 5:
+                items.append(f"- {text}")
+
+        if not items:
+            continue
+
+        joined = "\n".join(items)
+
+        # Learning Outcomes heuristisch erkennen
+        if re.search(r"\bLO\d+\b", joined):
+
+            add_chunk(
+                "Lernergebnisse",
+                joined
+            )
+
+        else:
+
+            add_chunk(
+                "Liste",
+                joined
+            )
+
+    return chunks
+
+
+
 
 
 # ===============================================================================
@@ -494,9 +609,9 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
 
     program_id = get_or_create_study_program(code, name, degree)
 
-    if _chunks_exist_for_program(program_id):
-        print(f"   Bereits vorhanden - ueberspringe.")
-        return 0
+    #if _chunks_exist_for_program(program_id):
+        #print(f"   Bereits vorhanden - ueberspringe.")
+        #return 0
 
     document_id = _create_document(program_id, source_label)
 
@@ -511,15 +626,28 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
         if not overview_html:
             raise ValueError(f"Uebersichtsseite nicht erreichbar: {url}")
 
-        lva_urls = extract_lva_links(overview_html)
-        print(f"   {len(lva_urls)} LVA-Detailseiten gefunden.")
-
         # Neue strukturierte Overview-Extraktion
         overview_rows = extract_overview_rows(overview_html, name, degree)
 
-        print(f"   DEBUG overview_rows: {len(overview_rows)}")
-        print("   DEBUG first 1000 chars overview_html:")
-        print(overview_html[:1000])
+        lva_urls = [
+            row["metadata"]["lva_url"]
+            for row in overview_rows
+            if row["metadata"].get("lva_url")
+        ]
+
+        print(f"   {len(lva_urls)} LVA-Detailseiten gefunden.")
+
+        overview_metadata_by_url = {}
+
+        for row in overview_rows:
+            metadata = row.get("metadata", {})
+            lva_url = metadata.get("lva_url")
+
+            if lva_url:
+                overview_metadata_by_url[lva_url] = metadata
+
+
+
 
         if overview_rows:
             ov_chunks = [r["content"] for r in overview_rows]
@@ -547,39 +675,71 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
         else:
             print("   Keine strukturierten Overview-Zeilen gefunden.")
 
-        # Stufe 2: LVA-Detailseiten
-        print(f"   Scrape {len(lva_urls)} LVA-Seiten...")
 
-        all_lva_chunks:  list[str] = []
+        # Stufe 2: LVA-Detailseiten
+        print(f"   Scrape {len(lva_urls)} von {len(lva_urls)} LVA-Seiten zum Test...")
+
+        all_lva_chunks: list[str] = []
         all_lva_sources: list[str] = []
+        all_lva_metadata: list[dict] = []
 
         for i, lva_url in enumerate(lva_urls, 1):
             time.sleep(REQUEST_DELAY)
+
             lva_html = fetch_html(lva_url)
+
             if not lva_html:
                 continue
 
-            lva_text = extract_lva_text(lva_html, lva_url)
-            if lva_text.strip() and len(lva_text) > 100:
-                chunks = chunk_text(lva_text)
-                all_lva_chunks.extend(chunks)
-                all_lva_sources.extend([lva_url] * len(chunks))
 
-            if i % 20 == 0:
-                print(f"      {i}/{len(lva_urls)} LVAs geladen...")
+
+
+            lva_items = extract_lva_chunks(
+                lva_html,
+                lva_url,
+                name,
+                degree,
+                overview_metadata=overview_metadata_by_url.get(lva_url),
+            )
+
+            for item in lva_items:
+                all_lva_chunks.append(item["content"])
+                all_lva_sources.append(lva_url)
+                all_lva_metadata.append(item["metadata"])
+
+            print(f"      {i}/3 Test-LVAs geladen: {len(lva_items)} Chunks")
 
         if all_lva_chunks:
             print(f"   Generiere Embeddings fuer {len(all_lva_chunks)} LVA-Chunks...")
+
             lva_embeddings = embed_service.embed_texts(all_lva_chunks)
+
             saved = _batch_insert_chunks(
-                all_lva_chunks, lva_embeddings, all_lva_sources,
-                document_id, "lva_detail", chunk_offset,
+                all_lva_chunks,
+                lva_embeddings,
+                all_lva_sources,
+                document_id,
+                "lva_detail",
+                chunk_offset,
+                extra_metadata=all_lva_metadata,
             )
+
             total_saved += saved
+
             print(f"   LVA-Chunks: {saved}/{len(all_lva_chunks)} gespeichert.")
 
-        supabase.table("documents").update({"status": "processed"}).eq("id", document_id).execute()
-        print(f"   Fertig: {total_saved} Chunks gespeichert ({len(lva_urls)} LVAs).")
+        else:
+            print("   Keine LVA-Chunks gefunden.")
+
+        supabase.table("documents").update({
+            "status": "processed"
+        }).eq("id", document_id).execute()
+
+        print(
+            f"   Fertig: {total_saved} Chunks gespeichert "
+            f"({len(lva_urls)} LVA-Seiten)"
+        )
+
         return total_saved
 
     except Exception as e:
