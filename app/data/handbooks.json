@@ -5,41 +5,6 @@
     "name":   "Wirtschaftsinformatik",
     "degree": "Bachelor",
     "url":    "https://studienhandbuch.jku.at/curr/1193?lang=de"
-  },
-  {
-    "code":   "033/515",
-    "name":   "Betriebswirtschaftslehre",
-    "degree": "Bachelor",
-    "url":    "https://studienhandbuch.jku.at/curr/1156?lang=de"
-  },
-
-  {
-    "code":   "033/514",
-    "name":   "International Business Administration",
-    "degree": "Bachelor",
-    "url":    "https://studienhandbuch.jku.at/curr/1189?lang=de"
-  },
-
-  {
-    "code":   "033/572",
-    "name":   "Wirtschaftswissenschaften",
-    "degree": "Bachelor",
-    "url":    "https://studienhandbuch.jku.at/curr/1194?lang=de"
-  },
-
-  {
-    "code":   "066/926",
-    "name":   "Wirtschaftsinformatik",
-    "degree": "Master",
-    "url":    "https://studienhandbuch.jku.at/curr/1199?lang=de"
-  },
-
-  {
-    "code":   "066/973",
-    "name":   "Management",
-    "degree": "Master",
-    "url":    "https://studienhandbuch.jku.at/curr/1197?lang=de"
   }
-
 
 ]

@@ -5,8 +5,18 @@ handbook_scraper.py – Zweistufiger Admin-Scraper für das JKU Studienhandbuch.
 SCRAPING-STRATEGIE (zweistufig):
 ---------------------------------
 Stufe 1 – Übersichtsseite (z.B. /curr/1193):
-  • Enthält die komplette Modulstruktur als Tabelle (Modulname, ECTS, LV-Typ)
-  • Extrahiert alle LVA-Links (Format: studienhandbuch.jku.at/XXXXXX)
+    • Enthält die hierarchische Modulstruktur des Studiengangs
+      (Module → Gruppen → Lehrveranstaltungen)
+    • Extrahiert strukturierte Overview-Chunks inklusive:
+        - Modulname
+        - Gruppenname
+        - Lehrveranstaltung
+        - LV-Typ
+        - ECTS
+    • Speichert strukturierte Metadata für Retrieval und Filtering
+    • Extrahiert zusätzlich alle LVA-Detailseiten-Links
+      (Format: studienhandbuch.jku.at/XXXXXX)
+
 
 Stufe 2 – Jede LVA-Detailseite (z.B. /188056):
   • Lernergebnisse, Kompetenzen, Fertigkeiten, Kenntnisse
@@ -86,6 +96,15 @@ def extract_lva_links(html: str) -> list[str]:
     wobei XXXXXX eine reine Zahl ist (z.B. /188056).
     """
     soup = BeautifulSoup(html, "html.parser")
+
+    print("DEBUG table count:", len(soup.find_all("table")))
+
+    for idx, tr in enumerate(soup.find_all("tr")[:40]):
+        cells = [
+            td.get_text(separator=" ", strip=True)
+            for td in tr.find_all(["td", "th"])
+        ]
+        print(f"ROW {idx}: {cells}")
     lva_urls: set[str] = set()
 
     for a in soup.find_all("a", href=True):
@@ -123,6 +142,136 @@ def extract_overview_text(html: str, program_name: str) -> str:
         return ""
 
     return f"STUDIENPLAN {program_name.upper()}\n\n" + "\n".join(rows)
+
+
+
+
+"""
+Extrahiert die hierarchische Struktur der Studienplan-Uebersicht.
+
+Die JKU-Studienhandbuch-Seite verwendet eine verschachtelte
+Darstellung:
+
+  Modul
+    Gruppe/Fach
+      VL/UE/KS/...
+
+Diese Funktion erzeugt strukturierte Overview-Chunks fuer:
+  • Module
+  • Gruppen
+  • konkrete Lehrveranstaltungen
+
+Zusätzlich werden strukturierte Metadata gespeichert:
+  • module_name
+  • course_name
+  • lva_name
+  • course_type
+  • ects
+  • overview_level
+"""
+def extract_overview_rows(html: str, degree_name: str, degree_type: str):
+    soup = BeautifulSoup(html, "html.parser")
+
+    rows = []
+    current_module = None
+    current_group = None
+
+    course_types = {"VL", "UE", "KV", "KS", "SE", "PR", "KT", "IK", "PJ", "PS", "PE"}
+
+    for tr in soup.find_all("tr"):
+        cells = [
+            td.get_text(" ", strip=True)
+            for td in tr.find_all(["td", "th"])
+        ]
+
+        if len(cells) != 2:
+            continue
+
+        title = cells[0].strip()
+        ects = cells[1].strip()
+
+        if not ects.replace(",", "").replace(".", "").isdigit():
+            continue
+
+        clean_title = title.replace(".", "").strip()
+        parts = clean_title.split()
+        first_word = parts[0] if parts else ""
+
+        # Level 1: gesamtes Modul
+        if not title.startswith("."):
+            current_module = clean_title
+            current_group = None
+
+            content = (
+                f"Studium: {degree_name}. Typ: {degree_type}. "
+                f"Modul: {current_module}. ECTS: {ects}."
+            )
+
+            rows.append({
+                "content": content,
+                "metadata": {
+                    "study_program": degree_name,
+                    "degree": degree_type,
+                    "overview_level": "module",
+                    "module_name": current_module,
+                    "course_name": None,
+                    "course_type": None,
+                    "ects": ects,
+                }
+            })
+
+        # Level 2: Gruppe / Fach innerhalb eines Moduls
+        elif title.startswith("........") and not title.startswith("................"):
+            current_group = clean_title
+
+            content = (
+                f"Studium: {degree_name}. Typ: {degree_type}. "
+                f"Modul: {current_module}. Gruppe: {current_group}. ECTS: {ects}."
+            )
+
+            rows.append({
+                "content": content,
+                "metadata": {
+                    "study_program": degree_name,
+                    "degree": degree_type,
+                    "overview_level": "group",
+                    "module_name": current_module,
+                    "course_name": current_group,
+                    "course_type": None,
+                    "ects": ects,
+                }
+            })
+
+        # Level 3: konkrete Lehrveranstaltung
+        elif title.startswith("................"):
+            course_type = first_word if first_word in course_types else None
+
+            content = (
+                f"Studium: {degree_name}. Typ: {degree_type}. "
+                f"Modul: {current_module}. Gruppe: {current_group}. "
+                f"Lehrveranstaltung: {clean_title}. ECTS: {ects}."
+            )
+
+            rows.append({
+                "content": content,
+                "metadata": {
+                    "study_program": degree_name,
+                    "degree": degree_type,
+                    "overview_level": "lva",
+                    "module_name": current_module,
+                    "course_name": current_group,
+                    "course_type": course_type,
+                    "lva_name": clean_title,
+                    "ects": ects,
+                }
+            })
+
+    return rows
+
+
+
+
+
 
 
 # ===============================================================================
@@ -262,12 +411,13 @@ def _create_document(study_program_id: str, source_label: str) -> str:
 
 
 def _batch_insert_chunks(
-    chunks:      list[str],
-    embeddings:  list[list[float]],
-    sources:     list[str],
+    chunks: list[str],
+    embeddings: list[list[float]],
+    sources: list[str],
     document_id: str,
-    chunk_type:  str,
+    chunk_type: str,
     chunk_offset: int,
+    extra_metadata: list[dict] | None = None,
 ) -> int:
     """
     Speichert Chunks in Batches statt einzeln.
@@ -278,30 +428,35 @@ def _batch_insert_chunks(
     :returns: Anzahl erfolgreich gespeicherter Chunks
     """
     total_saved = 0
-    rows = [
-        {
-            "document_id": document_id,
-            "content":     chunk,
-            "embedding":   vector,
+    rows = []
+
+    for i, (chunk, vector, src) in enumerate(zip(chunks, embeddings, sources)):
+        metadata = {
+            "source_type": chunk_type,
+            "source_url": src,
             "chunk_index": chunk_offset + i,
-            "metadata": {
-                "source_url":  src,
-                "chunk_index": chunk_offset + i,
-                "chunk_type":  chunk_type,
-                "has_table":   "|" in chunk,
-            },
+            "chunk_type": chunk_type,
+            "has_table": "|" in chunk,
         }
-        for i, (chunk, vector, src) in enumerate(zip(chunks, embeddings, sources))
-    ]
+
+        if extra_metadata and i < len(extra_metadata):
+            metadata.update(extra_metadata[i])
+
+        rows.append({
+            "content": chunk,
+            "embedding": vector,
+            "document_id": document_id,
+            "metadata": metadata
+        })
 
     for batch_start in range(0, len(rows), INSERT_BATCH_SIZE):
-        batch = rows[batch_start : batch_start + INSERT_BATCH_SIZE]
+        batch = rows[batch_start: batch_start + INSERT_BATCH_SIZE]
         try:
             supabase.table(CHUNK_TABLE).insert(batch).execute()
             total_saved += len(batch)
         except Exception as e:
-            print(f"      Batch {batch_start//INSERT_BATCH_SIZE + 1} Fehler: {e}")
-            # Einzeln versuchen um so viele wie moeglich zu retten
+            print(f"      Batch {batch_start // INSERT_BATCH_SIZE + 1} Fehler: {e}")
+
             for row in batch:
                 try:
                     supabase.table(CHUNK_TABLE).insert(row).execute()
@@ -352,23 +507,45 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
         # Stufe 1: Uebersichtsseite
         print(f"   Lade Uebersichtsseite...")
         overview_html = fetch_html(url)
+
         if not overview_html:
             raise ValueError(f"Uebersichtsseite nicht erreichbar: {url}")
 
         lva_urls = extract_lva_links(overview_html)
         print(f"   {len(lva_urls)} LVA-Detailseiten gefunden.")
 
-        overview_text = extract_overview_text(overview_html, name)
-        if overview_text.strip():
-            ov_chunks     = chunk_text(overview_text)
+        # Neue strukturierte Overview-Extraktion
+        overview_rows = extract_overview_rows(overview_html, name, degree)
+
+        print(f"   DEBUG overview_rows: {len(overview_rows)}")
+        print("   DEBUG first 1000 chars overview_html:")
+        print(overview_html[:1000])
+
+        if overview_rows:
+            ov_chunks = [r["content"] for r in overview_rows]
+            ov_metadata = [r["metadata"] for r in overview_rows]
+
+            print(f"   Generiere Embeddings fuer {len(ov_chunks)} Overview-Chunks...")
             ov_embeddings = embed_service.embed_texts(ov_chunks)
+
+
+
             saved = _batch_insert_chunks(
-                ov_chunks, ov_embeddings, [url] * len(ov_chunks),
-                document_id, "overview", chunk_offset,
+                ov_chunks,
+                ov_embeddings,
+                [url] * len(ov_chunks),
+                document_id,
+                "overview",
+                chunk_offset,
+                extra_metadata=ov_metadata,
             )
-            total_saved  += saved
+
+            total_saved += saved
             chunk_offset += len(ov_chunks)
+
             print(f"   Uebersicht: {saved} Chunks gespeichert.")
+        else:
+            print("   Keine strukturierten Overview-Zeilen gefunden.")
 
         # Stufe 2: LVA-Detailseiten
         print(f"   Scrape {len(lva_urls)} LVA-Seiten...")

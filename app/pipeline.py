@@ -340,6 +340,7 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
                 "embedding":   vector,
                 "chunk_index": i,
                 "metadata": {
+                    "source_type":      "curriculum_pdf",
                     "source_filename":  filename,
                     "page_number":      chunk_meta["page_number"],
                     "section_heading":  chunk_meta["section_heading"],
