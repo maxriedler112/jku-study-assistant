@@ -5,8 +5,18 @@ handbook_scraper.py – Zweistufiger Admin-Scraper für das JKU Studienhandbuch.
 SCRAPING-STRATEGIE (zweistufig):
 ---------------------------------
 Stufe 1 – Übersichtsseite (z.B. /curr/1193):
-  • Enthält die komplette Modulstruktur als Tabelle (Modulname, ECTS, LV-Typ)
-  • Extrahiert alle LVA-Links (Format: studienhandbuch.jku.at/XXXXXX)
+    • Enthält die hierarchische Modulstruktur des Studiengangs
+      (Module → Gruppen → Lehrveranstaltungen)
+    • Extrahiert strukturierte Overview-Chunks inklusive:
+        - Modulname
+        - Gruppenname
+        - Lehrveranstaltung
+        - LV-Typ
+        - ECTS
+    • Speichert strukturierte Metadata für Retrieval und Filtering
+    • Extrahiert zusätzlich alle LVA-Detailseiten-Links
+      (Format: studienhandbuch.jku.at/XXXXXX)
+
 
 Stufe 2 – Jede LVA-Detailseite (z.B. /188056):
   • Lernergebnisse, Kompetenzen, Fertigkeiten, Kenntnisse
@@ -133,6 +143,32 @@ def extract_overview_text(html: str, program_name: str) -> str:
 
     return f"STUDIENPLAN {program_name.upper()}\n\n" + "\n".join(rows)
 
+
+
+
+"""
+Extrahiert die hierarchische Struktur der Studienplan-Uebersicht.
+
+Die JKU-Studienhandbuch-Seite verwendet eine verschachtelte
+Darstellung:
+
+  Modul
+    Gruppe/Fach
+      VL/UE/KS/...
+
+Diese Funktion erzeugt strukturierte Overview-Chunks fuer:
+  • Module
+  • Gruppen
+  • konkrete Lehrveranstaltungen
+
+Zusätzlich werden strukturierte Metadata gespeichert:
+  • module_name
+  • course_name
+  • lva_name
+  • course_type
+  • ects
+  • overview_level
+"""
 def extract_overview_rows(html: str, degree_name: str, degree_type: str):
     soup = BeautifulSoup(html, "html.parser")
 
@@ -161,7 +197,7 @@ def extract_overview_rows(html: str, degree_name: str, degree_type: str):
         parts = clean_title.split()
         first_word = parts[0] if parts else ""
 
-        # Level 1: Modul
+        # Level 1: gesamtes Modul
         if not title.startswith("."):
             current_module = clean_title
             current_group = None
