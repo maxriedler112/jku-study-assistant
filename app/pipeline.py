@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from chunking import chunk_text
 from embeddings import EmbeddingService
+from pdf_chunking import chunk_curriculum_pdf
 
 load_dotenv()
 
@@ -358,6 +359,95 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
 
     return len(chunks_with_meta)
 
+# ===============================================================================
+# ADMIN-PIPELINE: Curriculum-PDF mit strukturierten Metadaten
+# ===============================================================================
+# DIESEN BLOCK am Ende von pipeline.py einfügen (vor process_ics).
+# process_pdf() bleibt vollständig unverändert.
+# ===============================================================================
+
+def process_pdf_curriculum(
+    pdf_bytes:  bytes,
+    filename:   str,
+    program_id: str,
+    user_id:    str,
+    degree:     str,
+    study_program: str,
+) -> int:
+    """
+    Verarbeitet ein Curriculum-PDF mit web-chunk-kompatiblen Metadaten.
+
+    Nutzt pdf_chunking.py statt der generischen chunking.py-Logik.
+    Alle anderen Schritte (Supabase-Upload, Embedding) bleiben identisch
+    zu process_pdf().
+
+    :param pdf_bytes:     Rohe PDF-Bytes
+    :param filename:      Dateiname für Metadaten und Duplikat-Check
+    :param program_id:    UUID des Studiengangs in study_programs
+    :param user_id:       UUID des Admin-Users
+    :param degree:        "Bachelor" oder "Master"
+    :param study_program: z.B. "Wirtschaftsinformatik"
+    :returns:             Anzahl gespeicherter Chunks
+    """
+    from pdf_chunking import chunk_curriculum_pdf
+
+    # ── Duplikat-Check (identisch zu process_pdf) ─────────────────────────────
+    existing = (
+        supabase.table("documents")
+        .select("id")
+        .eq("filename", filename)
+        .eq("study_program_id", program_id)
+        .execute()
+    )
+    if existing.data:
+        raise ValueError(f"PDF '{filename}' wurde bereits verarbeitet.")
+
+    # ── Dokument in documents-Tabelle anlegen ──────────────────────────────────
+    doc_result = supabase.table("documents").insert({
+        "filename":         filename,
+        "user_id":      user_id,
+        "study_program_id": program_id,
+        "status":           "processing",
+    }).execute()
+    document_id = doc_result.data[0]["id"]
+
+    try:
+        # ── Chunks mit strukturierten Metadaten erzeugen ───────────────────────
+        chunks = chunk_curriculum_pdf(pdf_bytes, degree=degree, study_program=study_program)
+
+        if not chunks:
+            raise ValueError("Keine Chunks erzeugt – PDF leer oder nicht lesbar.")
+
+        # ── Embeddings generieren ──────────────────────────────────────────────
+        embed_service = EmbeddingService()
+        texts = [c["content"] for c in chunks]
+        embeddings = embed_service.embed_texts(texts)
+
+        # ── Chunks in Supabase speichern ───────────────────────────────────────
+        for i, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+            # Metadaten mit Pflichtfeldern anreichern
+            meta = {
+                **chunk["metadata"],
+                "source_filename": filename,
+                "chunk_index":     i,
+                "study_program":   study_program,
+                "degree":          degree,
+            }
+            supabase.table("chunks").insert({
+                "document_id": document_id,
+                "content":     chunk["content"],
+                "embedding":   vector,
+                "chunk_index": i,
+                "metadata":    meta,
+            }).execute()
+
+        supabase.table("documents").update({"status": "processed"}).eq("id", document_id).execute()
+
+    except Exception as e:
+        supabase.table("documents").update({"status": "error"}).eq("id", document_id).execute()
+        raise e
+
+    return len(chunks)
 
 # ===============================================================================
 # USER-PIPELINE: ICS-Kalender
