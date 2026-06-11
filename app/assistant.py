@@ -128,6 +128,27 @@ def _is_full_curriculum_question(question: str) -> bool:
     ]
     return any(kw in question.lower() for kw in keywords)
 
+
+# ── NEU: Erkennung von strukturierten Fragen (Code, Modul, ECTS) ─────────
+def _is_structured_question(question: str) -> bool:
+    """
+    Erkennt Fragen die eine präzise Antwort aus curriculum_row-Chunks
+    erwarten: Code-Abfragen, Modul-Zugehörigkeit, ECTS-Werte.
+    Diese brauchen mehr Chunks UND Priorisierung von curriculum_row.
+    """
+    structured_keywords = [
+        "welchen code", "welcher code", "code hat",
+        "studienfachkennung",
+        "gehört zu", "teil von", "zugeordnet",
+        "gliedert sich",
+        "wie viele ects", "wieviele ects", "ects hat",
+        "welche fächer gehören", "welche module gehören",
+        "zu welchem fach",
+    ]
+    q_lower = question.lower()
+    return any(kw in q_lower for kw in structured_keywords)
+
+
 def ask_assistant(question: str, user_id: str = None, study_program_id: str = None) -> str:
     context_parts = []
 
@@ -137,8 +158,16 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
         if events_text:
             context_parts.append(f"KALENDER-EINTRAEGE:\n{events_text}")
 
-    # 2. Listenfragen brauchen mehr Chunks
-    match_count = 20 if _is_list_question(question) else 6
+    # 2. Match-Count bestimmen je nach Fragetyp
+    #    - Listenfragen: 20 (möglichst vollständig)
+    #    - Strukturierte Fragen (Code, Modul, ECTS): 15 (genug Curriculum-Chunks)
+    #    - Standard: 10 (vorher 6 → war zu wenig)
+    if _is_list_question(question) or _is_full_curriculum_question(question):
+        match_count = 20
+    elif _is_structured_question(question):
+        match_count = 15
+    else:
+        match_count = 10
 
     # 3. Vektorsuche
     results = search_jku_knowledge(
@@ -147,16 +176,13 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
         match_count=match_count,
     )
 
-    # Vollständige Kurslisten: noch mehr Chunks + nur Übersichts-Chunks
-    if _is_full_curriculum_question(question):
-        match_count = 20
-
     if results:
-        # Tabellen-Chunks zuerst bei Listenfragen
-        if _is_list_question(question):
+        # NEU: curriculum_row-Chunks bei ALLEN strukturierten Fragen priorisieren,
+        # nicht nur bei Listenfragen. Das stellt sicher dass Code-, ECTS- und
+        # Modul-Fragen die richtigen strukturierten Chunks zuerst sehen.
+        if _is_list_question(question) or _is_structured_question(question):
             results.sort(key=lambda r: (
-                0 if "|" in r.get("content", "") 
-                or r.get("metadata", {}).get("chunk_type") in ("curriculum_row", "overview_table")
+                0 if r.get("metadata", {}).get("chunk_type") in ("curriculum_row", "overview_table")
                 else 1
             ))
         chunks_text = "\n\n---\n\n".join([res["content"] for res in results])
@@ -176,34 +202,42 @@ Heute ist der {date.today().strftime('%d.%m.%Y')}.
 QUELLEN IM KONTEXT:
 Der Kontext enthaelt zwei Arten von Quellen:
 1. "curriculum_row" / "overview_table": Offizielle Curriculum-Daten (PDF) mit ECTS, Codes und Modulzuordnung.
+   Diese Eintraege haben das Format: "Studium: X. Typ: Y. Modul: Z. Code: ABC. Bezeichnung: DEF. ECTS: N."
 2. Web-Daten: Detailinfos zu einzelnen Lehrveranstaltungen (Beurteilung, Sprache, Lehrmethode).
-Curriculum-Daten haben Vorrang bei ECTS und Modulzuordnung.
+Curriculum-Daten haben Vorrang bei ECTS, Codes und Modulzuordnung.
 Web-Daten haben Vorrang bei Beurteilungskriterien, Lehrmethoden und Abhaltungssprache.
 
 REGELN:
 1. ECTS-Fragen:
-   - Nenne den ECTS-Wert des Moduls laut Curriculum (z.B. "Datenmodellierung: 6 ECTS").
+   - Nenne den ECTS-Wert des Moduls/Fachs laut Curriculum-Eintrag (z.B. "Datenmodellierung: 6 ECTS").
    - Ignoriere ECTS-Werte einzelner Uebungen oder Vorlesungen aus Web-Daten.
+   - Wenn Curriculum und Web-Daten unterschiedliche ECTS zeigen, verwende NUR den Curriculum-Wert.
    - Nenne jeden Wert nur einmal, auch wenn mehrere Quellen ihn bestaetigen.
 
-2. Modul-/Kurslisten:
-   - Liste nur Kurse auf, die im Kontext EXPLIZIT diesem Modul zugeordnet sind.
-   - Ignoriere Kurse aus anderen Modulen, auch wenn sie thematisch aehnlich sind.
-   - Bevorzuge Eintraege mit "Modul: X" im Text fuer Modul-Fragen.
+2. Code-Fragen (Studienfachkennung):
+   - Suche im Kontext nach Eintraegen mit "Code: XXX" im Curriculum-Format.
+   - Antworte mit dem exakten Code aus dem Curriculum-Eintrag.
+   - Beispiel: Wenn im Kontext steht "Code: 526INEN13. Bezeichnung: Information Engineering."
+     und die Frage ist "Welchen Code hat Information Engineering?" → Antwort: "526INEN13".
 
-3. Pflichtfaecher / Wahlfaecher:
+3. Modul-Zugehoerigkeits-Fragen:
+   - Suche nach Eintraegen mit "Modul: X" im Curriculum-Format.
+   - Liste ALLE Eintraege auf, die diesem Modul zugeordnet sind.
+   - Ignoriere Eintraege aus anderen Modulen, auch wenn sie thematisch aehnlich sind.
+
+4. Pflichtfaecher / Wahlfaecher:
    - Liste ALLE im Kontext genannten Pflicht- oder Wahlfaecher auf.
    - Trenne klar zwischen Basiskompetenz und Kernkompetenz.
 
-4. Beurteilung / Lehrmethoden / Sprache:
+5. Beurteilung / Lehrmethoden / Sprache:
    - Extrahiere den exakten Wert aus dem Kontext ohne zu umschreiben.
    - Suche gezielt nach "Beurteilungskriterien:", "Lehrmethoden:", "Abhaltungssprache:".
 
-5. Mehrere Quellen mit gleicher Information:
+6. Mehrere Quellen mit gleicher Information:
    - Fasse zusammen, liste nicht mehrfach auf.
-   - Beispiel: Steht "6 ECTS" in 3 Chunks → antworte einmal "6 ECTS".
+   - Wenn Curriculum "6 ECTS" sagt und Web-Daten "3 ECTS" fuer eine Teilleistung: nenne nur "6 ECTS".
 
-6. Fehlende Informationen:
+7. Fehlende Informationen:
    - Wenn die Antwort nicht im Kontext steht: sage klar "Diese Information liegt mir nicht vor."
    - Erfinde KEINE Kurse, ECTS-Werte oder Pruefungsmodalitaeten.
 
