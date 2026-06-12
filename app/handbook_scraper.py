@@ -19,6 +19,8 @@ Stufe 1 – Übersichtsseite (z.B. /curr/1193):
 
 
 Stufe 2 – Jede LVA-Detailseite (z.B. /188056):
+  • VerantwortlicheR
+  • Anmeldevoraussetzungen
   • Lernergebnisse, Kompetenzen, Fertigkeiten, Kenntnisse
   • Beurteilungskriterien, Lehrmethoden, Literatur
   • ECTS, Semesterstunden, Abhaltungssprache, Teilungsziffer
@@ -51,7 +53,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-from chunking import chunk_text
+
 from embeddings import EmbeddingService
 from pipeline import get_or_create_study_program, supabase as _pipeline_supabase
 
@@ -73,7 +75,7 @@ HEADERS = {
 
 supabase: Client = _pipeline_supabase
 
-
+LVA_TYPES = {"VL", "UE", "KV", "KS", "SE", "PR", "KT", "IK", "PJ", "PS", "PE", "VU", "VO", "KO", "AG"}
 # ===============================================================================
 # STUFE 1 - UEBERSICHTSSEITE
 # ===============================================================================
@@ -87,35 +89,6 @@ def fetch_html(url: str) -> Optional[str]:
     except requests.RequestException as e:
         print(f"    Fehler beim Laden von {url}: {e}")
         return None
-
-
-
-def extract_overview_text(html: str, program_name: str) -> str:
-    """
-    Extrahiert den Strukturtext der Uebersichtsseite (Modulbaum + ECTS-Tabelle).
-    """
-    soup = BeautifulSoup(html, "html.parser")
-
-    for tag in soup.select("nav, header, footer, script, style, .menu, "
-                           "#sidebar, .breadcrumb, form"):
-        tag.decompose()
-
-    content_table = soup.find("table", recursive=True)
-    if not content_table:
-        return ""
-
-    rows = []
-    for tr in content_table.find_all("tr"):
-        cells = [td.get_text(separator=" ", strip=True) for td in tr.find_all(["td", "th"])]
-        cells = [c for c in cells if c]
-        if cells:
-            rows.append(" | ".join(cells))
-
-    if not rows:
-        return ""
-
-    return f"STUDIENPLAN {program_name.upper()}\n\n" + "\n".join(rows)
-
 
 
 
@@ -142,6 +115,7 @@ Zusätzlich werden strukturierte Metadata gespeichert:
   • ects
   • overview_level
 """
+
 def extract_overview_rows(html: str, degree_name: str, degree_type: str):
     soup = BeautifulSoup(html, "html.parser")
 
@@ -149,112 +123,111 @@ def extract_overview_rows(html: str, degree_name: str, degree_type: str):
     current_module = None
     current_group = None
 
-    course_types = {"VL", "UE", "KV", "KS", "SE", "PR", "KT", "IK", "PJ", "PS", "PE"}
+
 
     for tr in soup.find_all("tr"):
-        cells = [
-            td.get_text(" ", strip=True)
-            for td in tr.find_all(["td", "th"])
-        ]
+            cells = [
+                td.get_text(" ", strip=True)
+                for td in tr.find_all(["td", "th"])
+            ]
 
-        if len(cells) != 2:
-            continue
+            if len(cells) != 2:
+                continue
 
-        title = cells[0].strip()
-        ects = cells[1].strip()
+            title = cells[0].strip()
+            ects = cells[1].strip()
 
-        if not ects.replace(",", "").replace(".", "").isdigit():
-            continue
+            if not ects.replace(",", "").replace(".", "").isdigit():
+                continue
 
-        clean_title = title.replace(".", "").strip()
-        parts = clean_title.split()
-        first_word = parts[0] if parts else ""
+            clean_title = title.replace(".", "").strip()
+            parts = clean_title.split()
+            first_word = parts[0] if parts else ""
 
-        # Level 1: gesamtes Modul
-        if not title.startswith("."):
-            current_module = clean_title
-            current_group = None
+            is_lva = first_word in LVA_TYPES
 
-            content = (
-                f"Studium: {degree_name}. Typ: {degree_type}. "
-                f"Modul: {current_module}. ECTS: {ects}."
-            )
+            # Level 1: Modul
+            if not title.startswith("."):
+                current_module = clean_title
+                current_group = None
 
-            rows.append({
-                "content": content,
-                "metadata": {
-                    "study_program": degree_name,
-                    "degree": degree_type,
-                    "overview_level": "module",
-                    "module_name": current_module,
-                    "course_name": None,
-                    "course_type": None,
-                    "ects": ects,
-                }
-            })
+                content = (
+                    f"Studium: {degree_name}. Typ: {degree_type}. "
+                    f"Modul: {current_module}. ECTS: {ects}."
+                )
 
-        # Level 2: Gruppe / Fach innerhalb eines Moduls
-        elif title.startswith("........") and not title.startswith("................"):
-            current_group = clean_title
+                rows.append({
+                    "content": content,
+                    "metadata": {
+                        "study_program": degree_name,
+                        "degree": degree_type,
+                        "overview_level": "module",
+                        "module_name": current_module,
+                        "course_name": None,
+                        "course_type": None,
+                        "ects": ects,
+                    }
+                })
 
-            content = (
-                f"Studium: {degree_name}. Typ: {degree_type}. "
-                f"Modul: {current_module}. Gruppe: {current_group}. ECTS: {ects}."
-            )
+            # Level 3: Lehrveranstaltung
+            # Wichtig: Einige LVAs haben keine Gruppe und stehen deshalb auf derselben
+            # Einrückungsebene wie Gruppen. Deshalb wird LVA über den Typ erkannt.
+            elif is_lva:
+                course_type = first_word
 
-            rows.append({
-                "content": content,
-                "metadata": {
-                    "study_program": degree_name,
-                    "degree": degree_type,
-                    "overview_level": "group",
-                    "module_name": current_module,
-                    "course_name": current_group,
-                    "course_type": None,
-                    "ects": ects,
-                }
-            })
+                link_tag = tr.find("a", href=True)
+                lva_url = None
 
-        # Level 3: konkrete Lehrveranstaltung
-        elif title.startswith("................"):
-            course_type = first_word if first_word in course_types else None
+                if link_tag:
+                    href = link_tag["href"].strip()
 
-            link_tag = tr.find("a", href=True)
-            lva_url = None
+                    if href.startswith("http"):
+                        lva_url = href
+                    elif href.startswith("/"):
+                        lva_url = f"{BASE_URL}{href}"
 
-            if link_tag:
-                href = link_tag["href"].strip()
+                content = (
+                    f"Studium: {degree_name}. Typ: {degree_type}. "
+                    f"Modul: {current_module}. Gruppe: {current_group}. "
+                    f"Lehrveranstaltung: {clean_title}. ECTS: {ects}."
+                )
 
-                if href.startswith("http"):
-                    lva_url = href
-                elif href.startswith("/"):
-                    lva_url = f"{BASE_URL}{href}"
+                rows.append({
+                    "content": content,
+                    "metadata": {
+                        "study_program": degree_name,
+                        "degree": degree_type,
+                        "overview_level": "lva",
+                        "module_name": current_module,
+                        "course_name": current_group,
+                        "course_type": course_type,
+                        "lva_name": clean_title,
+                        "lva_url": lva_url,
+                        "ects": ects,
+                    }
+                })
 
-            content = (
-                f"Studium: {degree_name}. Typ: {degree_type}. "
-                f"Modul: {current_module}. Gruppe: {current_group}. "
-                f"Lehrveranstaltung: {clean_title}. ECTS: {ects}."
-                        )
-            content = (
-                f"Studium: {degree_name}. Typ: {degree_type}. "
-                f"Modul: {current_module}. Gruppe: {current_group}. "
-                f"Lehrveranstaltung: {clean_title}. ECTS: {ects}."
-            )
+            # Level 2: Gruppe / Fach
+            else:
+                current_group = clean_title
 
-            rows.append({
-                "content": content,
-                "metadata": {
-                    "study_program": degree_name,
-                    "degree": degree_type,
-                    "overview_level": "lva",
-                    "module_name": current_module,
-                    "course_name": current_group,
-                    "course_type": course_type,
-                    "lva_name": clean_title,
-                    "lva_url": lva_url,
-                    "ects": ects,
-                }
-            })
+                content = (
+                    f"Studium: {degree_name}. Typ: {degree_type}. "
+                    f"Modul: {current_module}. Gruppe: {current_group}. ECTS: {ects}."
+                )
+
+                rows.append({
+                    "content": content,
+                    "metadata": {
+                        "study_program": degree_name,
+                        "degree": degree_type,
+                        "overview_level": "group",
+                        "module_name": current_module,
+                        "course_name": current_group,
+                        "course_type": None,
+                        "ects": ects,
+                    }
+                })
 
     return rows
 
@@ -280,13 +253,13 @@ def extract_lva_chunks(
     Extrahiert strukturierte semantische Chunks aus einer LVA-Detailseite.
 
     WICHTIG:
-    - Kein generisches chunk_text() mehr fuer HTML-Seiten
-    - Stattdessen direkte semantische Chunks pro Sektion
     - Nur vorhandene Felder/Sektionen werden gespeichert
     - Metadata aus Ebene 1 werden uebernommen
     """
 
     soup = BeautifulSoup(html, "html.parser")
+
+
 
     # Unnoetige Bereiche entfernen
     for tag in soup.select(
@@ -300,6 +273,9 @@ def extract_lva_chunks(
     def clean(value: str) -> str:
         return re.sub(r"\s+", " ", value or "").strip()
 
+
+
+
     def add_chunk(
         section: str,
         value: str,
@@ -308,9 +284,7 @@ def extract_lva_chunks(
         """
         Fuegt nur sinnvolle/nicht-leere Chunks hinzu.
         """
-
         value = clean(value)
-
         if not value or len(value) < 3:
             return
 
@@ -345,6 +319,14 @@ def extract_lva_chunks(
             "metadata": metadata,
         })
 
+    def extract_between(text: str, start: str, end: str) -> str:
+            pattern = re.compile(
+                rf"{re.escape(start)}\s*(.*?)\s*{re.escape(end)}",
+                re.DOTALL
+            )
+            match = pattern.search(text)
+            return clean(match.group(1)) if match else ""
+
     # ---------------------------------------------------------------------------
     # 1. Titel extrahieren
     # ---------------------------------------------------------------------------
@@ -369,6 +351,31 @@ def extract_lva_chunks(
 
     fields = {}
 
+    # Header/Value-Tabelle auf LVA-Seiten erkennen
+    # Beispiel:
+    # Workload | Ausbildungslevel | Studienfachbereich | VerantwortlicheR | Semesterstunden | Anbietende Uni
+    # 3 ECTS   | B2 - Bachelor... | Wirtschaftsinformatik | Michael Schrefl | 2 SSt | JKU
+
+    for tr in soup.find_all("tr"):
+        cells = [
+            clean(c.get_text(" ", strip=True))
+            for c in tr.find_all(["td", "th"], recursive=False)
+        ]
+        cells = [c for c in cells if c]
+
+        if "Workload" in cells and "VerantwortlicheR" in cells:
+            next_tr = tr.find_next_sibling("tr")
+            if next_tr:
+                values = [
+                    clean(c.get_text(" ", strip=True))
+                    for c in next_tr.find_all(["td", "th"], recursive=False)
+                ]
+                values = [v for v in values if v]
+
+                if len(values) == len(cells):
+                    for key, value in zip(cells, values):
+                        fields[key] = value
+
     for tr in soup.find_all("tr"):
 
         cells = tr.find_all(["td", "th"], recursive=False)
@@ -383,7 +390,13 @@ def extract_lva_chunks(
             value = clean(cells[1].get_text(" ", strip=True))
 
             if label and value:
-                fields[label] = value
+                    if label not in [
+                        "Kompetenzen",
+                        "Fertigkeiten",
+                        "Kenntnisse",
+                    ]:
+                        fields[label] = value
+
 
         # Tabellen mit mehreren Spalten
         elif len(cells) > 2:
@@ -422,6 +435,17 @@ def extract_lva_chunks(
             " ".join(basis_info)
         )
 
+    for label in [
+        "Workload",
+        "Ausbildungslevel",
+        "Studienfachbereich",
+        "VerantwortlicheR",
+        "Semesterstunden",
+        "Anbietende Uni",
+    ]:
+        if label in fields:
+            add_chunk(label, fields[label])
+
     # ---------------------------------------------------------------------------
     # 4. Bekannte Sektionen
     # ---------------------------------------------------------------------------
@@ -454,39 +478,92 @@ def extract_lva_chunks(
             )
 
     # ---------------------------------------------------------------------------
-    # 5. Listen (LO2, Literaturpunkte, Bullet Lists...)
+    # 4a. Lernergebnisse-Untersektionen
     # ---------------------------------------------------------------------------
 
-    for ul in soup.find_all(["ul", "ol"]):
+    full_text = soup.get_text("\n", strip=True)
 
-        items = []
+    lernergebnisse_block = extract_between(
+        full_text,
+        "Lernergebnisse",
+        "Beurteilungskriterien"
+    )
 
-        for li in ul.find_all("li", recursive=False):
+    if lernergebnisse_block:
+        kompetenzen_text = extract_between(
+            lernergebnisse_block,
+            "Kompetenzen",
+            "Fertigkeiten"
+        )
 
-            text = clean(li.get_text(" ", strip=True))
+        lo_items = re.findall(
+            r"(LO\d+:\s.*?)(?=\s+LO\d+:|\Z)",
+            lernergebnisse_block,
+            flags=re.DOTALL
+        )
 
-            if text and len(text) > 5:
-                items.append(f"- {text}")
+        if "VL Einführung in die Softwareentwicklung" in title_text:
+            print("\nDEBUG LERNERGEBNISSE BLOCK")
+            print(lernergebnisse_block)
+            print("\nDEBUG LO ITEMS")
+            print(lo_items)
 
-        if not items:
-            continue
+        fertigkeiten_items = []
+        kenntnisse_items = []
 
-        joined = "\n".join(items)
+        for item in lo_items:
+            item_clean = clean(item)
 
-        # Learning Outcomes heuristisch erkennen
-        if re.search(r"\bLO\d+\b", joined):
+            if item_clean.startswith("LO1:"):
+                kenntnisse_items.append(item_clean)
+            else:
+                fertigkeiten_items.append(item_clean)
 
+        if kompetenzen_text:
             add_chunk(
                 "Lernergebnisse",
-                joined
+                kompetenzen_text,
+                {"subsection": "Kompetenzen"}
             )
 
-        else:
-
+        if fertigkeiten_items:
             add_chunk(
-                "Liste",
-                joined
+                "Lernergebnisse",
+                "\n".join(fertigkeiten_items),
+                {"subsection": "Fertigkeiten"}
             )
+
+        if kenntnisse_items:
+            add_chunk(
+                "Lernergebnisse",
+                "\n".join(kenntnisse_items),
+                {"subsection": "Kenntnisse"}
+            )
+
+        combined_parts = []
+
+        if kompetenzen_text:
+            combined_parts.append(f"Kompetenzen: {kompetenzen_text}")
+
+        if fertigkeiten_items:
+            combined_parts.append("Fertigkeiten:\n" + "\n".join(fertigkeiten_items))
+
+        if kenntnisse_items:
+            combined_parts.append("Kenntnisse:\n" + "\n".join(kenntnisse_items))
+
+        if combined_parts:
+            add_chunk(
+                "Lernergebnisse",
+                "\n\n".join(combined_parts),
+                {"subsection": "Alle"}
+            )
+
+
+
+
+
+
+
 
     return chunks
 
@@ -707,7 +784,7 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
                 all_lva_sources.append(lva_url)
                 all_lva_metadata.append(item["metadata"])
 
-            print(f"      {i}/3 Test-LVAs geladen: {len(lva_items)} Chunks")
+            print(f"      {i}/{len(lva_items)} LVAs geladen...")
 
         if all_lva_chunks:
             print(f"   Generiere Embeddings fuer {len(all_lva_chunks)} LVA-Chunks...")

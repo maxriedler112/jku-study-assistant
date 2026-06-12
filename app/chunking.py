@@ -13,7 +13,7 @@ ABLAUF:
   clean_text()
     Artefakte entfernen, Silbentrennung reparieren, Zeilen zusammenführen,
     Tabellenstruktur (Markdown "|"-Zeilen) schützen
-    │
+    │[]
     ▼
   chunk_text()
     Text in sinnvolle Abschnitte aufteilen – mit drei Strategien:
