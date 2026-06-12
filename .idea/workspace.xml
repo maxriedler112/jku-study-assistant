@@ -4,9 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="33371708-1a0f-4c33-9373-f2b16cd2347e" name="Changes" comment="Formating/commenting">
+    <list default="true" id="33371708-1a0f-4c33-9373-f2b16cd2347e" name="Changes" comment="Improve LVA details page chunking">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/chunking.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/chunking.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/data/handbooks.json" beforeDir="false" afterPath="$PROJECT_DIR$/app/data/handbooks.json" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/handbook_scraper.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/handbook_scraper.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/search.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/search.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -61,6 +64,11 @@
         <option name="Make" enabled="true" />
       </method>
     </configuration>
+    <configuration default="true" type="KotlinStandaloneScriptRunConfigurationType">
+      <module name="jku-study-assistant" />
+      <option name="filePath" />
+      <method v="2" />
+    </configuration>
   </component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
@@ -95,7 +103,15 @@
       <option name="project" value="LOCAL" />
       <updated>1779108096181</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="Improve LVA details page chunking">
+      <option name="closed" value="true" />
+      <created>1779137467737</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1779137467737</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="UnknownFeatures">
@@ -105,6 +121,7 @@
     <MESSAGE value=" Add source type metadata to chunks" />
     <MESSAGE value="Refactor overview chunking and add structured metadata" />
     <MESSAGE value="Formating/commenting" />
-    <option name="LAST_COMMIT_MESSAGE" value="Formating/commenting" />
+    <MESSAGE value="Improve LVA details page chunking" />
+    <option name="LAST_COMMIT_MESSAGE" value="Improve LVA details page chunking" />
   </component>
 </project>
