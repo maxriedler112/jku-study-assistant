@@ -3,9 +3,8 @@ import re
 from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from groq import Groq
-from ics import Calendar
 from supabase import create_client, Client
-from app.search import search_jku_knowledge
+from search import search_jku_knowledge
 
 load_dotenv()
 
