@@ -1,5 +1,4 @@
 import os
-import re
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from embeddings import EmbeddingService
@@ -20,11 +19,9 @@ def search_jku_knowledge(query_text: str, study_program_id: str = None, match_co
     Curriculum- und Web-Chunks abgeglichen.
     """
     embed_service = EmbeddingService()
-    
-    # 1. Query Expansion ausführen (Abkürzungen & Intent-Keywords anreichern)
+
     expanded_query = _expand_query(query_text)
-    
-    # 2. Text in Vektor umwandeln (E5 verlangt das Präfix 'query: ' für Suchanfragen)
+
     query_vector = embed_service.model.encode(
         f"query: {expanded_query}",
         normalize_embeddings=True
@@ -40,7 +37,23 @@ def search_jku_knowledge(query_text: str, study_program_id: str = None, match_co
 
     # 4. Remote Procedure Call in Supabase triggern und Daten zurückgeben
     response = supabase.rpc("match_documents", params).execute()
-    return response.data or []
+    results = response.data or []
+
+    print("\nTOP RESULTS")
+    for r in results:
+        metadata = r.get("metadata", {})
+
+        print(
+            metadata.get("lva_name"),
+            "|",
+            metadata.get("section"),
+            "|",
+            metadata.get("subsection"),
+            "| similarity:",
+            r.get("similarity")
+        )
+
+    return results
 
 
 def _expand_query(query: str) -> str:
@@ -91,6 +104,10 @@ def _expand_query(query: str) -> str:
         "sprache":           "Abhaltungssprache Deutsch Englisch",
         "voraussetzung":     "Anmeldevoraussetzungen",
         "teilungsziffer":    "Teilungsziffer Zuteilungsverfahren",
+        "fertigkeiten": "Fertigkeiten Lernergebnisse Learning Outcomes LO",
+        "kenntnisse": "Kenntnisse Lernergebnisse Learning Outcomes LO",
+        "kompetenzen": "Kompetenzen Lernergebnisse Learning Outcomes LO",
+        "lernergebnisse": "Lernergebnisse Kompetenzen Fertigkeiten Kenntnisse Learning Outcomes LO",
     }
     
     result = query
