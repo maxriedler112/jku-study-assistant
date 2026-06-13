@@ -1,0 +1,67 @@
+[
+    
+  {
+    "code":   "033/526",
+    "name":   "Wirtschaftsinformatik",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1193?lang=de"
+  },
+
+  {
+    "code":   "033/514",
+    "name":   "International Business Administration",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1189"
+  },
+
+  {
+    "code":   "033/317",
+    "name":   "Kulturwissenschaften",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1190"
+  },
+
+  {
+    "code":   "033/528",
+    "name":   "Sozialwirtschaft",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1195"
+  },
+
+  {
+    "code":   "033/505",
+    "name":   "Soziologie",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1191"
+  },
+
+  {
+    "code":   "033/551",
+    "name":   "Statistik und Data Science",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1192"
+  },
+
+  {
+    "code":   "033/162",
+    "name":   "Transformation Studies. Art x Science",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1225"
+  },
+
+  {
+    "code":   "033/572",
+    "name":   "Wirtschaftswissenschaften",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1194"
+  },
+
+  {
+    "code":   "033/515",
+    "name":   "Betriebswirtschaftslehre ",
+    "degree": "Bachelor",
+    "url":    "https://studienhandbuch.jku.at/curr/1156"
+  }
+
+
+]
