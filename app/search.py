@@ -12,42 +12,48 @@ supabase: Client = create_client(url, key)
 
 
 def search_jku_knowledge(query_text: str, study_program_id: str = None, match_count: int = 8):
+    """
+    Führt eine semantische Vektorsuche (VSS) in der Supabase-Wissensdatenbank durch.
+    
+    Die Suchanfrage wird vorab expandiert, über den EmbeddingService (E5-Modell) 
+    vektorisiert und via RPC-Funktion ('match_documents') mit den gespeicherten 
+    Curriculum- und Web-Chunks abgeglichen.
+    """
     embed_service = EmbeddingService()
     
-    # Query Expansion: Bekannte Abkürzungen ausschreiben
-    # → besseres semantisches Matching
+    # 1. Query Expansion ausführen (Abkürzungen & Intent-Keywords anreichern)
     expanded_query = _expand_query(query_text)
     
+    # 2. Text in Vektor umwandeln (E5 verlangt das Präfix 'query: ' für Suchanfragen)
     query_vector = embed_service.model.encode(
         f"query: {expanded_query}",
         normalize_embeddings=True
     ).tolist()
 
+    # 3. Parameter für die PostgreSQL-Ähnlichkeitssuche (Kosinus-Ähnlichkeit) definieren
     params = {
         "query_embedding":   query_vector,
         "match_threshold":   0.3,      
         "match_count":       match_count,  
-        "filter_program_id": study_program_id,
+        "filter_program_id": study_program_id, # Optionaler Filter auf eine bestimmte JKU-Studienrichtung
     }
 
+    # 4. Remote Procedure Call in Supabase triggern und Daten zurückgeben
     response = supabase.rpc("match_documents", params).execute()
     return response.data or []
 
 
 def _expand_query(query: str) -> str:
     """
-    Erweitert bekannte JKU-Abkürzungen und Fragetypen im Query-Text.
-    Das verbessert das semantische Matching erheblich, weil
-    das Embedding-Modell den ausgeschriebenen Begriff besser
-    mit dem Curriculum-Text verknüpfen kann.
+    Reichert die Suchanfrage des Benutzers mit Synonymen, JKU-spezifischen Begriffen 
+    und akademischen Ausschreibungen (z. B. 'STEOP', 'LVA') an.
     
-    ÄNDERUNGEN V2:
-    - NEU: Expansions für Code/Studienfachkennung-Abfragen
-    - NEU: Expansions für Modul-Zugehörigkeits-Fragen
-    - NEU: Expansions für Semester-/Studienverlauf-Fragen
+    Durch das Anhängen dieser Schlüsselwörter erzielt das dichte Einbettungsmodell 
+    (Dense Embedding) eine signifikant höhere Trefferquote bei der Kosinus-Ähnlichkeit 
+    auf den strukturierten Curriculum-Daten.
     """
     expansions = {
-        # ── Abkürzungen ──────────────────────────────────────────────
+        # ── JKU Abkürzungen ──────────────────────────────────────────────
         "STEOP":  "Studieneingangs- und Orientierungsphase STEOP",
         "ECTS":   "ECTS Leistungspunkte Credits",
         "VL":     "Vorlesung VL",
@@ -86,9 +92,13 @@ def _expand_query(query: str) -> str:
         "voraussetzung":     "Anmeldevoraussetzungen",
         "teilungsziffer":    "Teilungsziffer Zuteilungsverfahren",
     }
+    
     result = query
     q_lower = query.lower()
+    
+    # Iteriere durch das Dictionary und hänge passende Erweiterungen als String-Suffix an
     for term, expanded in expansions.items():
         if term.lower() in q_lower:
             result = result + " " + expanded
+            
     return result

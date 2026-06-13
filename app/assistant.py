@@ -22,8 +22,22 @@ supabase: Client = create_client(_url, _key)
 
 
 def _is_valid_user_id(user_id: str) -> bool:
-    """JKU Matrikelnummer: optionales 'k' + 7-8 Ziffern."""
-    return bool(user_id and re.match(r'^k?\d{7,8}$', user_id.strip()))
+    """
+    Validiert, ob die übergebene User-ID entweder eine JKU-Matrikelnummer 
+    (z. B. k12345678 oder 1234567) oder eine Standard-UUIDv4 ist.
+    """
+    if not user_id:
+        return False
+    user_id = user_id.strip()
+    
+    # Matrikelnummer: Optionales 'k' gefolgt von 7 bis 8 Ziffern
+    if re.match(r'^k?\d{7,8}$', user_id):
+        return True
+        
+    # UUID: Klassisches 8-4-4-4-12 Hexadezimal-Muster
+    if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', user_id):
+        return True
+    return False
 
 
 TIME_KEYWORDS = [
@@ -39,27 +53,42 @@ TIME_KEYWORDS = [
 
 
 def is_time_based(question: str) -> bool:
+    """
+    Prüft per Keyword-Matching, ob die Benutzerfrage auf zeitbasierte 
+    Informationen (Termine, Stundenplan, Prüfungen) abzielt.
+    """
     q = question.lower()
     return any(kw in q for kw in TIME_KEYWORDS)
 
 
 def get_date_range(question: str):
+    """
+    Ermittelt basierend auf relativen Zeitangaben in der Frage das passende 
+    Start- und Enddatum. Fällt standardmäßig auf ein 28-Tage-Fenster zurück.
+    """
     q = question.lower()
     today = date.today()
 
+    # Nächste Woche: Berechne Tage bis zum nächsten Montag, setze Fenster auf Mo-So
     if 'nächste woche' in q or 'kommende woche' in q or 'naechste woche' in q:
         days_until_monday = (7 - today.weekday()) % 7 or 7
         start = today + timedelta(days=days_until_monday)
         end = start + timedelta(days=6)
+        
+    # Diese Woche: Vom aktuellen Montag bis zum kommenden Sonntag
     elif 'diese woche' in q:
         start = today - timedelta(days=today.weekday())
         end = start + timedelta(days=6)
+        
     elif 'morgen' in q:
         start = today + timedelta(days=1)
         end = start
+        
     elif 'heute' in q:
         start = today
         end = today
+        
+    # Default-Horizont: Die nächsten 4 Wochen für allgemeine Kalenderanfragen
     else:
         start = today
         end = today + timedelta(days=28)
@@ -68,10 +97,15 @@ def get_date_range(question: str):
 
 
 def query_events(question: str, user_id: str) -> str:
+    """
+    Sucht KUSSS-Kalendereinträge des Users aus der Supabase-Datenbank, 
+    die im berechneten Zeitraum liegen, und formatiert sie als Plain-Text-Liste.
+    """
     if not _is_valid_user_id(user_id):
         return ""
     start, end = get_date_range(question)
 
+    # Abfrage der Events innerhalb der Datumsgrenzen (inkl. Puffer für den Endtag)
     response = (
         supabase.table("events")
         .select("course_name,course_type,event_type,description,start_dt,end_dt,location")
@@ -85,6 +119,7 @@ def query_events(question: str, user_id: str) -> str:
     if not response.data:
         return ""
 
+    # String-Formatierung der Events für den LLM-Kontext
     lines = []
     for ev in response.data:
         dt = datetime.fromisoformat(ev["start_dt"]).strftime("%d.%m.%Y %H:%M")
@@ -100,10 +135,105 @@ def query_events(question: str, user_id: str) -> str:
     return "\n".join(lines)
 
 
+def query_grades(user_id: str) -> str:
+    """
+    Lädt die Noten des Users aus completed_courses und formatiert sie
+    strukturiert und gruppiert (nach Status und Typ) als Kontext für das LLM.
+    """
+    if not _is_valid_user_id(user_id):
+        return ""
+
+    result = (
+        supabase.table("completed_courses")
+        .select("course_name,course_type,ects,grade,grade_label,passed,exam_date")
+        .eq("user_id", user_id)
+        .order("exam_date")
+        .execute()
+    )
+
+    if not result.data:
+        return ""
+
+    total_ects = 0
+    passed_count = 0
+    failed_count = 0
+    grade_sum = 0
+    grade_count = 0
+
+    # Dictionaries/Listen für die Gruppierung
+    passed_courses_by_type = {}
+    failed_courses = []
+
+    for entry in result.data:
+        ects = float(entry.get("ects", 0) or 0)
+        grade = entry.get("grade")
+        passed = entry.get("passed", False)
+        label = entry.get("grade_label", "")
+        name = entry.get("course_name", "")
+        typ = entry.get("course_type", "")
+        datum = entry.get("exam_date", "")
+
+        # Einzelne Zeile formatieren
+        line = f"- {name}: {ects} ECTS, {label}"
+        if datum:
+            line += f", {datum}"
+
+        # In entsprechende Gruppe einsortieren
+        if passed:
+            total_ects += ects
+            passed_count += 1
+            
+            # Gruppieren nach LVA-Typ (VL, UE, KS...)
+            if typ not in passed_courses_by_type:
+                passed_courses_by_type[typ] = []
+            passed_courses_by_type[typ].append(line)
+        else:
+            failed_count += 1
+            line_with_type = f"- {name} ({typ}): {ects} ECTS, {label} [{datum}]"
+            failed_courses.append(line_with_type)
+
+        # Schnitt berechnen (nur positive numerische Noten)
+        if grade and grade <= 4:
+            grade_sum += grade
+            grade_count += 1
+
+    schnitt = round(grade_sum / grade_count, 2) if grade_count > 0 else None
+
+    # ---------------------------------------------------------
+    # Ausgabe für das LLM zusammenbauen
+    # ---------------------------------------------------------
+    output_parts = []
+
+    # 1. Zusammenfassung
+    summary = [
+        "ZUSAMMENFASSUNG:",
+        f"Bestanden: {passed_count} | Nicht bestanden: {failed_count}",
+        f"Erreichte ECTS: {total_ects}",
+    ]
+    if schnitt:
+        summary.append(f"Notendurchschnitt: {schnitt}")
+    output_parts.append("\n".join(summary))
+
+    # 2. Bestandene Kurse nach LVA-Typ sortiert
+    if passed_courses_by_type:
+        output_parts.append("BESTANDENE LEHRVERANSTALTUNGEN:")
+        # Alphabetisch nach LVA-Typ sortieren (z.B. KS, SE, UE, VL)
+        for typ, lines in sorted(passed_courses_by_type.items()):
+            group_title = f"--- {typ} ---" if typ else "--- Sonstige ---"
+            group_text = group_title + "\n" + "\n".join(lines)
+            output_parts.append(group_text)
+
+    # 3. Offene / Nicht bestandene Kurse
+    if failed_courses:
+        output_parts.append("OFFEN / NICHT BESTANDEN:\n" + "\n".join(failed_courses))
+
+    return "\n\n".join(output_parts)
+
+
 def _is_list_question(question: str) -> bool:
     """
-    Erkennt ob eine Frage eine vollstaendige Liste erwartet
-    (Kurse, Faecher, LVAs, Semester etc.) statt einer kurzen Erklaerung.
+    Prüft, ob der User nach Listen, Semestern oder Modulübersichten sucht, 
+    um das Abruflimit (match_count) für Textelemente hochzusetzen.
     """
     list_keywords = [
         "welche kurse", "welche fächer", "welche lehrveranstaltungen",
@@ -120,6 +250,10 @@ def _is_list_question(question: str) -> bool:
 
 
 def _is_full_curriculum_question(question: str) -> bool:
+    """
+    Erkennt Fragen, die den gesamten Studienplan oder alle Kurse auf einmal 
+    abfragen möchten (erfordert maximales Kontext-Fenster).
+    """
     keywords = [
         "alle fächer", "alle kurse", "alle lehrveranstaltungen",
         "welche fächer hat", "welche kurse hat", "vollständige liste",
@@ -129,12 +263,10 @@ def _is_full_curriculum_question(question: str) -> bool:
     return any(kw in question.lower() for kw in keywords)
 
 
-# ── NEU: Erkennung von strukturierten Fragen (Code, Modul, ECTS) ─────────
 def _is_structured_question(question: str) -> bool:
     """
-    Erkennt Fragen die eine präzise Antwort aus curriculum_row-Chunks
-    erwarten: Code-Abfragen, Modul-Zugehörigkeit, ECTS-Werte.
-    Diese brauchen mehr Chunks UND Priorisierung von curriculum_row.
+    Erkennt gezielte Fragen nach IDs, Studienfachkennungen (Codes), 
+    ECTS-Werten oder exakten Modulgliederungen.
     """
     structured_keywords = [
         "welchen code", "welcher code", "code hat",
@@ -149,19 +281,47 @@ def _is_structured_question(question: str) -> bool:
     return any(kw in q_lower for kw in structured_keywords)
 
 
+def _is_grade_question(question: str) -> bool:
+    """
+    Prüft, ob die Frage persönliche Leistungsdaten, Noten, ECTS-Fortschritt 
+    oder offene/fehlende Fächer betrifft.
+    """
+    grade_keywords = [
+        "note", "noten", "benotet", "bestanden", "nicht bestanden",
+        "studienerfolg", "notendurchschnitt", "durchschnitt", "schnitt",
+        "welche prüfungen", "welche kurse bestanden", "welche lvas bestanden",
+        "ects bestanden", "ects geschafft", "ects habe ich",
+        "studienfortschritt", "fortschritt",
+        "noch offen", "fehlt mir", "was fehlt", "was muss ich noch",
+        "meine noten", "meine prüfungen", "meine ects",
+        "wie stehe ich", "wie weit bin ich",
+        "sehr gut", "genügend", "befriedigend",
+    ]
+    q_lower = question.lower()
+    return any(kw in q_lower for kw in grade_keywords)
+
+
 def ask_assistant(question: str, user_id: str = None, study_program_id: str = None) -> str:
+    """
+    Zentrale RAG-Pipeline: Analysiert den Fragetyp, füttert den Kontext 
+    dynamisch aus relationalen DB-Daten (Kalender, Noten) sowie der Vektordatenbank 
+    (Curriculum-Wissen) und generiert die finale Antwort über Groq (Llama 3.1).
+    """
     context_parts = []
 
-    # 1. Zeitbasierte Frage → Kalender
+    # 1a. Zeitbasierte Frage → Persönliche KUSSS-Termine einspeisen
     if user_id and _is_valid_user_id(user_id) and is_time_based(question):
         events_text = query_events(question, user_id)
         if events_text:
             context_parts.append(f"KALENDER-EINTRAEGE:\n{events_text}")
 
-    # 2. Match-Count bestimmen je nach Fragetyp
-    #    - Listenfragen: 20 (möglichst vollständig)
-    #    - Strukturierte Fragen (Code, Modul, ECTS): 15 (genug Curriculum-Chunks)
-    #    - Standard: 10 (vorher 6 → war zu wenig)
+    # 1b. Noten-Frage → Studienerfolg (Notennachweis) anhängen
+    if user_id and _is_valid_user_id(user_id) and _is_grade_question(question):
+        grades_text = query_grades(user_id)
+        if grades_text:
+            context_parts.append(f"DEIN STUDIENERFOLG:\n{grades_text}")
+
+    # 2. Dynamische Steuerung der Ähnlichkeitssuche (Chunk-Menge steuern)
     if _is_list_question(question) or _is_full_curriculum_question(question):
         match_count = 20
     elif _is_structured_question(question):
@@ -169,17 +329,15 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
     else:
         match_count = 10
 
-    # 3. Vektorsuche
+    # 3. Vektorsuche auf Curriculum- und Webdaten ausführen
     results = search_jku_knowledge(
         question,
         study_program_id=study_program_id,
         match_count=match_count,
     )
 
+    # 4. Suchergebnisse sortieren (Tabellen/Curriculum-Zeilen vor unstrukturierten Web-Daten ranken)
     if results:
-        # NEU: curriculum_row-Chunks bei ALLEN strukturierten Fragen priorisieren,
-        # nicht nur bei Listenfragen. Das stellt sicher dass Code-, ECTS- und
-        # Modul-Fragen die richtigen strukturierten Chunks zuerst sehen.
         if _is_list_question(question) or _is_structured_question(question):
             results.sort(key=lambda r: (
                 0 if r.get("metadata", {}).get("chunk_type") in ("curriculum_row", "overview_table")
@@ -188,23 +346,25 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
         chunks_text = "\n\n---\n\n".join([res["content"] for res in results])
         context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
 
-    # context_parts → fertiger String fuer den System-Prompt
+    # Kontext final zusammenbauen oder Fallback definieren
     context_text = (
         "\n\n".join(context_parts)
         if context_parts
         else "Keine relevanten Informationen in der Wissensdatenbank gefunden."
     )
 
+    # Strict System Prompt zur Einhaltung der JKU-Datenhierarchie definieren
     system_prompt = f"""Du bist ein hilfreicher Studien-Assistent fuer die JKU Linz.
 Nutze NUR den unten stehenden Kontext fuer deine Antwort.
 Heute ist der {date.today().strftime('%d.%m.%Y')}.
 
 QUELLEN IM KONTEXT:
-Der Kontext enthaelt zwei Arten von Quellen:
+Der Kontext enthaelt bis zu drei Arten von Quellen:
 1. "curriculum_row" / "overview_table": Offizielle Curriculum-Daten (PDF) mit ECTS, Codes und Modulzuordnung.
    Diese Eintraege haben das Format: "Studium: X. Typ: Y. Modul: Z. Code: ABC. Bezeichnung: DEF. ECTS: N."
 2. Web-Daten: Detailinfos zu einzelnen Lehrveranstaltungen (Beurteilung, Sprache, Lehrmethode).
-Curriculum-Daten haben Vorrang bei ECTS, Codes und Modulzuordnung.
+3. "DEIN STUDIENERFOLG": Persoenliche Noten und ECTS des aktuellen Users.
+Curriculum-Daten haben Vorrang bei ECTS und Modulzuordnung.
 Web-Daten haben Vorrang bei Beurteilungskriterien, Lehrmethoden und Abhaltungssprache.
 
 REGELN:
@@ -241,17 +401,29 @@ REGELN:
    - Wenn die Antwort nicht im Kontext steht: sage klar "Diese Information liegt mir nicht vor."
    - Erfinde KEINE Kurse, ECTS-Werte oder Pruefungsmodalitaeten.
 
+8. Noten- und Fortschrittsfragen:
+   - Nutze AUSSCHLIESSLICH die Daten unter "DEIN STUDIENERFOLG" fuer persoenliche Fragen.
+   - Liste NUR Eintraege auf, die EXAKT so im Kontext stehen. Erfinde KEINE zusaetzlichen Eintraege.
+   - Bei Fragen nach Noten eines bestimmten Kurses: suche alle Eintraege die den gefragten Kursnamen enthalten. Liste nur diese auf, keine anderen Kurse.
+   - Bei "wie viele ECTS": nenne die ECTS-Summe aus der ZUSAMMENFASSUNG, nicht selbst zaehlen.
+   - Bei "Notendurchschnitt": nenne den Wert aus der ZUSAMMENFASSUNG.
+   - Bei "was fehlt mir noch": Das Bachelorstudium Wirtschaftsinformatik umfasst 180 ECTS.
+     Rechne: 180 minus bestandene ECTS = fehlende ECTS. Nenne NUR diese Zahl.
+     Liste KEINE konkreten fehlenden Kurse auf, da du nicht sicher weisst welche das sind.
+     Empfehle stattdessen, den Studienfortschritt in KUSSS zu pruefen.
+
 KONTEXT:
 {context_text}
 """
 
+    # 5. API-Inferenz über Groq ausführen
     chat_completion = client.chat.completions.create(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question},
         ],
         model="llama-3.1-8b-instant",
-        temperature=0.2,
+        temperature=0.2, # Niedrige Temperatur für geringe Halluzinationsanfälligkeit
     )
 
     return chat_completion.choices[0].message.content
