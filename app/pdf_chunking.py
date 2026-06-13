@@ -8,34 +8,21 @@ Modell PDF- und Web-Chunks gleich gut durchsuchen und kombinieren kann.
 STRATEGIE:
   1. Echte Tabellen (lines_strict) → pro Zeile ein strukturierter Chunk
      mit Metadaten: course_name, ects, code, module_name, section, degree
-  2. Fließtext (§-Absätze) → Contextual Chunks mit section_heading als
+  2. Semester-Tabellen (idealtypischer Studienverlauf) → lesbarer Chunk
+     pro Semester mit allen LVAs und ECTS
+  3. Übersichtstabellen (nur Bezeichnung+ECTS) → Gesamtübersicht als Chunk
+  4. Fließtext (§-Absätze) → Contextual Chunks mit section_heading als
      Kontext-Header (identisch zur bestehenden chunking.py-Logik)
-  3. Keine Text-basierte Tabellenerkennung mehr → vermeidet Fließtext-
-     Fehlklassifikation, die bisher riesige (~5000 Zeichen) Pseudo-Tabellen erzeugte
 
-WARUM EIGENE DATEI?
-  Die bestehende chunking.py + pipeline.py bleiben vollständig unverändert.
-  Nur admin_ingest_pdf.py (und process_pdf in pipeline.py) ruft diese
-  Funktionen zusätzlich auf.
-
-METADATEN-KOMPATIBILITÄT (Web-Chunk-Schema):
-  {
-    "ects":           "6",
-    "degree":         "Bachelor",
-    "lva_name":       "Datenmodellierung",          # Modul/Fach-Name
-    "has_table":      true,
-    "chunk_type":     "curriculum_row",              # neu: ein Kurs pro Chunk
-    "source_url":     None,                          # nur Web-Chunks
-    "chunk_index":    42,
-    "course_name":    "Datenmodellierung",
-    "course_type":    None,                          # nur Web-Chunks (VL/UE/KV)
-    "module_name":    "Grundlagen der Wirtschaftsinformatik",
-    "source_type":    "curriculum_pdf",
-    "study_program":  "Wirtschaftsinformatik",
-    "overview_level": "module",                      # "fach" | "module" | "overview"
-    "section":        "§ 7 Pflichtfächer",
-    "lva_code":       "526GLWNDAM13",                # Studienfachkennung / Code
-  }
+ÄNDERUNGEN GEGENÜBER V1:
+  - FIX: Off-by-one in Haupttabelle (Basiskompetenz/Kernkompetenz-Labels
+    existieren nur in Bezeichnung, nicht in Code/ECTS → Alignment-Fix)
+  - FIX: Multiline-Kursnamen ("Managements" als Fortsetzungszeile) werden
+    mit der vorherigen Zeile zusammengeführt
+  - FIX: module_name-Erkennung über Seitengrenzen hinweg (prev_text_end)
+  - FIX: Semester-Tabellen (idealtypischer Studienverlauf) werden erkannt
+    und als eigene Chunks mit Semester-Kontext ausgegeben
+  - FIX: Section-Labels werden pro Prose-Chunk aktualisiert statt pro Seite
 
 Abhängigkeiten: pdfplumber, chunking.py (clean_text, chunk_text)
 """
@@ -62,9 +49,12 @@ TABLE_SETTINGS_LINES = {
     "edge_min_length":     10,
 }
 
-# Seiten die übersprungen werden sollen (Inhaltsverzeichnis-Heuristik)
 _TOC_MARKER = ". ."
-_TOC_THRESHOLD = 8  # mehr als N ". ."-Vorkommen → Inhaltsverzeichnis
+_TOC_THRESHOLD = 8
+
+# Kategorie-Labels die NUR in der Bezeichnung-Spalte existieren,
+# aber KEINE eigene Zeile in Code/ECTS haben
+CATEGORY_LABELS = {"Basiskompetenz", "Kernkompetenz"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,32 +63,103 @@ _TOC_THRESHOLD = 8  # mehr als N ". ."-Vorkommen → Inhaltsverzeichnis
 
 def _expand_multiline_cells(table_data: list) -> list[dict]:
     """
-    pdfplumber liefert bei mehrzeiligen Zellen den Inhalt per '\\n' zusammengeklebt
-    in einer einzigen Datenzeile. Diese Funktion expandiert das zu separaten Zeilen.
-
-    Beispiel Input (raw aus pdfplumber):
-      [['Code', 'Bezeichnung', 'ECTS'],
-       ['526A\\n526B', 'Datenmodellierung\\nStatistik', '6\\n3']]
-
-    Beispiel Output:
-      [{'Code': '526A', 'Bezeichnung': 'Datenmodellierung', 'ECTS': '6'},
-       {'Code': '526B', 'Bezeichnung': 'Statistik',         'ECTS': '3'}]
+    Parst mehrzeilige Tabellenzellen und löst das JKU-spezifische Verschiebungsproblem.
+    Verhindert einen Off-by-One-Fehler, indem Kategorie-Labels (z.B. Basiskompetenz)
+    isoliert und mehrzeilige Kursbezeichnungen intelligent zusammengeführt werden.
     """
     if not table_data or len(table_data) < 2:
         return []
 
     header = [str(h or "").strip() for h in table_data[0]]
-    # Nur die erste Datenzeile enthält alle Werte (zusammengeklebt)
-    data_row = table_data[1]
-    cell_lists = [str(cell or "").split("\n") for cell in data_row]
-    max_rows = max(len(c) for c in cell_lists) if cell_lists else 0
 
+    # 1. Zeilenumbruch-getrennte Zellwerte spaltenweise aggregieren
+    col_values = [[] for _ in header]
+    for row_idx in range(1, len(table_data)):
+        for col_idx in range(len(header)):
+            cell = table_data[row_idx][col_idx] if col_idx < len(table_data[row_idx]) else ""
+            parts = str(cell or "").split("\n")
+            col_values[col_idx].extend(parts)
+
+    col_values = [[v.strip() for v in col] for col in col_values]
+
+    # 2. Key-Spalte 'Bezeichnung' für die strukturelle Ausrichtung identifizieren
+    bez_col = None
+    for i, h in enumerate(header):
+        if "bezeichnung" in h.lower():
+            bez_col = i
+            break
+
+    if bez_col is None:
+        # Fallback-Index-Zip falls kein eindeutiger Header existiert
+        max_rows = max(len(col) for col in col_values) if col_values else 0
+        rows = []
+        for i in range(max_rows):
+            row = {}
+            for col_idx, col_name in enumerate(header):
+                vals = col_values[col_idx]
+                row[col_name] = vals[i] if i < len(vals) else ""
+            rows.append(row)
+        return rows
+
+    # 3. Spaltenwerte in 'Bezeichnung' und 'Andere' splitten
+    bez_entries_raw = col_values[bez_col]
+    other_col_indices = [i for i in range(len(header)) if i != bez_col]
+
+    other_values = {}
+    for ci in other_col_indices:
+        other_values[ci] = [v for v in col_values[ci] if v]
+
+    # Maximale Anzahl an Datenzeilen anhand der Metadaten-Spalten (Code/ECTS) ermitteln
+    n_target = max(len(vals) for vals in other_values.values()) if other_values else 0
+
+    # 4. Echte Lehrveranstaltungen von reinen Tabellen-Zwischenüberschriften trennen
+    actual_entries = []   # (original_index, bezeichnung)
+    category_entries = [] # (original_index, bezeichnung)
+
+    for i, bez in enumerate(bez_entries_raw):
+        if not bez:
+            continue
+        if bez in CATEGORY_LABELS:
+            category_entries.append((i, bez))
+        else:
+            actual_entries.append((i, bez))
+
+    # 5. Fortsetzungszeilen (Multiline-Zellen ohne eigenen Code) beim Vorgänger anfügen
+    if n_target > 0 and len(actual_entries) > n_target:
+        merged = []
+        j = 0
+        while j < len(actual_entries):
+            idx, name = actual_entries[j]
+            j += 1
+            remaining_codes = n_target - len(merged) - 1
+            remaining_bez = len(actual_entries) - j
+            # Falls mehr Bezeichnungen als Codes übrig sind -> Textzeilen mergen
+            while remaining_bez > remaining_codes and j < len(actual_entries):
+                _, continuation = actual_entries[j]
+                name += " " + continuation
+                j += 1
+                remaining_bez = len(actual_entries) - j
+            merged.append((idx, name))
+        actual_entries = merged
+
+    # 6. Iteratoren für synchronisiertes Zusammensetzen aufsetzen
+    other_iters = {ci: iter(other_values[ci]) for ci in other_col_indices}
+
+    # Einträge anhand ihrer ursprünglichen PDF-Position sortieren, um die Reihenfolge zu wahren
+    all_entries = [(pos, "category", val) for pos, val in category_entries]
+    all_entries += [(pos, "data", val) for pos, val in actual_entries]
+    all_entries.sort(key=lambda x: x[0])
+
+    # 7. Finales Zeilen-Dictionary aufbauen
     rows = []
-    for i in range(max_rows):
-        row = {}
-        for col_idx, col_name in enumerate(header):
-            vals = cell_lists[col_idx] if col_idx < len(cell_lists) else []
-            row[col_name] = vals[i].strip() if i < len(vals) else ""
+    for pos, entry_type, val in all_entries:
+        row = {header[bez_col]: val}
+        if entry_type == "category":
+            for ci in other_col_indices:
+                row[header[ci]] = ""
+        else:
+            for ci in other_col_indices:
+                row[header[ci]] = next(other_iters[ci], "")
         rows.append(row)
 
     return rows
@@ -106,9 +167,8 @@ def _expand_multiline_cells(table_data: list) -> list[dict]:
 
 def _is_overview_table(table_data: list) -> bool:
     """
-    Erkennt Übersichtstabellen ohne Code-Spalte (z.B. die Gesamtübersicht
-    auf Seite 7: nur 'Bezeichnung' + 'ECTS', kein 'Code'/'Studienfachkennung').
-    Diese werden als einzelner prose-artiger Chunk behandelt, nicht zeilenweise.
+    Erkennt reine tabellarische Gesamtübersichten (z.B. Zuordnung der Fächer zu ECTS), 
+    denen eine konkrete 'Code'- bzw. 'Studienfachkennung'-Spalte fehlt.
     """
     if not table_data or not table_data[0]:
         return False
@@ -117,24 +177,31 @@ def _is_overview_table(table_data: list) -> bool:
     return not has_code
 
 
+def _is_semester_table(table_data: list) -> bool:
+    """
+    Erkennt Tabellen, die den empfohlenen bzw. idealtypischen Studienverlauf 
+    nach Semestern strukturiert abbilden.
+    """
+    if not table_data or not table_data[0]:
+        return False
+    first_cell = str(table_data[0][0] or "").strip()
+    return bool(re.match(r'\d+\.\s*Semester', first_cell))
+
+
 def _is_section_header_row(row: dict) -> bool:
     """
-    Erkennt Zwischenüberschriften in ECTS-Tabellen wie 'Basiskompetenz' oder
-    'Kernkompetenz', die keine echten Kurszeilen sind (ECTS-Zelle leer oder
-    enthält nur die Gesamtsumme '180').
+    Identifiziert Zeilen, die als interne Trenner fungieren (z.B. 'Gesamt', 
+    'Basiskompetenz'), um die Erzeugung von wertlosen Pseudo-Kurs-Chunks zu verhindern.
     """
     ects = row.get("ECTS", "").strip()
     bez  = row.get("Bezeichnung", "").strip()
     code = row.get("Code", row.get("Studienfachkennung", "")).strip()
 
-    # Zeilen ohne Code und ohne ECTS sind reine Kategorie-Labels
     if not ects and not code:
         return True
-    # Die Gesamtzeile
     if bez.lower() == "gesamt":
         return True
-    # Kategorie-Labels (Basiskompetenz, Kernkompetenz)
-    if bez in ("Basiskompetenz", "Kernkompetenz"):
+    if bez in CATEGORY_LABELS:
         return True
 
     return False
@@ -142,28 +209,40 @@ def _is_section_header_row(row: dict) -> bool:
 
 def _detect_section_context(page_text: str, prev_section: str) -> str:
     """
-    Erkennt die aktuelle §-Überschrift aus dem Seitenrohtext.
-    Gibt den letzten bekannten Abschnitt zurück falls nichts gefunden.
+    Durchsucht den gesamten Rohtext einer Seite nach Paragraphen-Zeichen (§) 
+    und liefert den letzten Treffer als aktuellen Kontext zurück.
     """
-    for line in page_text.splitlines()[:10]:
+    last_found = prev_section
+    for line in page_text.splitlines():
         line = line.strip()
         if re.match(r'^§\s*\d+[a-z]?\s+\S', line):
-            return line
-    return prev_section
+            last_found = line
+    return last_found
+
+
+def _extract_section_heading(text: str) -> Optional[str]:
+    """
+    Extrahiert eine valide §-Überschrift aus einem Text-Chunk und bereinigt diese 
+    von Klammern, Rändern oder Absatznummerierungen.
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith('['):
+            line = line.lstrip('[').rstrip(']').strip()
+        m = re.match(r'(§\s*\d+[a-z]?\s+[A-ZÄÖÜ][\w\s,\-&]*)', line)
+        if m:
+            heading = m.group(1).strip()
+            heading = re.split(r'\s*\(\d+\)', heading)[0].strip()
+            return heading
+    return None
 
 
 def _detect_module_context(text_before_table: str) -> str:
     """
-    Findet den zugehörigen Modul-/Fach-Namen aus dem Text DIREKT VOR einer Tabelle.
-
-    In §7 stehen Einleitungssätze wie:
-      "(6) Das Fach Information Engineering gliedert sich in folgende Module:"
-    Wir suchen nur in den letzten 150 Zeichen direkt vor der Tabelle —
-    damit werden Einleitungen vorheriger Tabellen nicht fälschlicherweise
-    als Modul-Kontext übernommen.
+    Analysiert das Textsegment direkt oberhalb einer Tabelle (letzte 200 Zeichen) 
+    nach der JKU-typischen Einleitungsphrase für Modul- und Fachbezeichnungen.
     """
-    # Nur die letzten 150 Zeichen — gerade genug für eine Einleitungszeile
-    relevant = text_before_table[-150:] if len(text_before_table) > 150 else text_before_table
+    relevant = text_before_table[-200:] if len(text_before_table) > 200 else text_before_table
     m = re.search(r'Das\s+Fach\s+(.+?)\s+gliedert\s+sich', relevant)
     if m:
         return m.group(1).strip()
@@ -181,28 +260,17 @@ def _overview_table_to_text(
     study_program: str,
 ) -> str:
     """
-    Wandelt eine Übersichtstabelle (nur Bezeichnung+ECTS) in einen lesbaren Text.
-
-    WICHTIG: pdfplumber liest diese Tabelle mit einem Offset-Fehler:
-    Kategorie-Labels wie 'Basiskompetenz' und 'Kernkompetenz' haben im PDF
-    keine eigene ECTS-Zelle, bekommen aber trotzdem einen Wert aus der
-    nächsten Zeile zugewiesen. Dadurch verschiebt sich die gesamte ECTS-Spalte.
-
-    Fix: Wir parsen Bezeichnung und ECTS direkt aus den rohen Zell-Listen
-    und überspringen Kategorie-Labels manuell, ohne _expand_multiline_cells().
+    Transformiert eine tabelarische Gesamtübersicht (Fach + ECTS) in einen Fließtext-Block 
+    und gleicht dabei fehlende Zellen-Offsets bei Kategorie-Trennern aus.
     """
     if not table_data or len(table_data) < 2:
         return ""
 
-    # Rohe Zell-Listen direkt aus pdfplumber
     bez_list  = str(table_data[1][0] or "").split("\n")
     ects_list = str(table_data[1][1] or "").split("\n") if len(table_data[1]) > 1 else []
 
-    # Kategorie-Labels die keine eigene ECTS-Zeile haben
-    CATEGORY_LABELS = {"basiskompetenz", "kernkompetenz"}
-
-    # Bezeichnungen ohne Kategorie-Labels → echte Fächer
-    faecher = [b.strip() for b in bez_list if b.strip() and b.strip().lower() not in CATEGORY_LABELS]
+    faecher = [b.strip() for b in bez_list
+               if b.strip() and b.strip().lower() not in {c.lower() for c in CATEGORY_LABELS}]
 
     lines = [f"Studium: {study_program}. Typ: {degree}. Abschnitt: {section}."]
     lines.append("ECTS-Übersicht:")
@@ -214,10 +282,82 @@ def _overview_table_to_text(
         if bez and ects:
             lines.append(f"  {bez}: {ects} ECTS")
 
-    # Gesamtsumme explizit hinzufügen
     lines.append("  Gesamt: 180 ECTS")
 
     return "\n".join(lines) if len(lines) > 2 else ""
+
+
+def _semester_table_to_chunk(
+    table_data:    list,
+    section:       str,
+    degree:        str,
+    study_program: str,
+) -> Optional[dict]:
+    """
+    Konvertiert eine Semester-Verlaufstabelle in ein textuelles Format und befüllt 
+    die Metadaten mit dem spezifischen 'semester_plan'-Typ für das Web-UI.
+    """
+    if not table_data or not table_data[0]:
+        return None
+
+    semester_name = str(table_data[0][0] or "").strip()
+
+    lines = [
+        f"Studium: {study_program}. Typ: {degree}. Abschnitt: {section}.",
+        f"Idealtypischer Studienverlauf, {semester_name}:"
+    ]
+
+    for row_idx in range(1, len(table_data)):
+        row = table_data[row_idx]
+        bez_raw  = str(row[0] or "").strip() if len(row) > 0 else ""
+        ects_raw = str(row[1] or "").strip() if len(row) > 1 else ""
+
+        # Rekursives Splitten, falls die Semesterdaten unaufgetrennt als Multiline-Block geliefert werden
+        if "\n" in bez_raw or "\n" in ects_raw:
+            bez_parts  = bez_raw.split("\n")
+            ects_parts = ects_raw.split("\n")
+            for i, b in enumerate(bez_parts):
+                b = b.strip()
+                e = ects_parts[i].strip() if i < len(ects_parts) else ""
+                if not b:
+                    continue
+                if b.lower() == "summe":
+                    lines.append(f"  Summe: {e} ECTS")
+                elif b and e:
+                    lines.append(f"  {b}: {e} ECTS")
+        else:
+            if not bez_raw:
+                continue
+            if bez_raw.lower() == "summe":
+                lines.append(f"  Summe: {ects_raw} ECTS")
+            elif bez_raw and ects_raw:
+                lines.append(f"  {bez_raw}: {ects_raw} ECTS")
+
+    if len(lines) <= 2:
+        return None
+
+    content = "\n".join(lines)
+
+    return {
+        "content": content,
+        "metadata": {
+            "ects":           None,
+            "degree":         degree,
+            "lva_name":       None,
+            "has_table":      True,
+            "chunk_type":     "semester_plan",
+            "source_url":     None,
+            "course_name":    None,
+            "course_type":    None,
+            "module_name":    None,
+            "source_type":    "curriculum_pdf",
+            "study_program":  study_program,
+            "overview_level": "semester",
+            "section":        section,
+            "lva_code":       None,
+            "semester_label": semester_name,
+        }
+    }
 
 
 def _chunks_from_table(
@@ -228,20 +368,11 @@ def _chunks_from_table(
     study_program: str,
 ) -> list[dict]:
     """
-    Erzeugt pro Kurszeile einen strukturierten Chunk + Metadaten.
-
-    Jeder Chunk enthält:
-      - content: lesbarer Text im Format der Web-Chunks
-        "Studium: Wirtschaftsinformatik. Typ: Bachelor. Modul: X. Bezeichnung: Y. ECTS: Z."
-      - metadata: dict kompatibel mit dem Web-Chunk-Schema
-
-    Zeilen die keine echten Kurse sind (Kategorie-Labels, Gesamtzeilen)
-    werden übersprungen.
+    Erzeugt aus einer Detail-Tabelle (LVA-Ebene) für jede extrahierte Zeile 
+    einen hochgradig strukturierten Key-Value-Text-Chunk für das Vektormodell.
     """
     rows = _expand_multiline_cells(table_data)
     chunks = []
-
-    # Laufender Kategorie-Kontext (Basiskompetenz / Kernkompetenz)
     current_category = ""
 
     for row in rows:
@@ -249,17 +380,16 @@ def _chunks_from_table(
         ects = row.get("ECTS", "").strip()
         code = row.get("Code", row.get("Studienfachkennung", "")).strip()
 
-        # Kategorie-Labels tracken für nachfolgende Zeilen
-        if bez in ("Basiskompetenz", "Kernkompetenz"):
+        if bez in CATEGORY_LABELS:
             current_category = bez
             continue
 
         if _is_section_header_row(row) or not bez:
             continue
 
-        # module_name: explizit > Kategorie > leer
         effective_module = module_name or current_category or ""
 
+        # Erzeugung des standardisierten, Suchmodell-optimierten Textformats
         content_parts = [
             f"Studium: {study_program}.",
             f"Typ: {degree}.",
@@ -309,10 +439,8 @@ def _chunks_from_prose(
     study_program: str,
 ) -> list[dict]:
     """
-    Erzeugt Fließtext-Chunks aus §-Absätzen.
-
-    Nutzt clean_text() + chunk_text() aus der bestehenden chunking.py
-    (unverändert). Jeder Chunk bekommt Basis-Metadaten ohne Kurs-Details.
+    Extrahiert reguläre Textblöcke und rechtliche Bestimmungen. Überwacht dabei 
+    während der Iteration Überschriften-Wechsel, um Chunks granulär zu labeln.
     """
     from chunking import clean_text, chunk_text
 
@@ -322,11 +450,16 @@ def _chunks_from_prose(
 
     raw_chunks = chunk_text(cleaned)
     result = []
+    running_section = section
 
     for raw in raw_chunks:
-        # Zu kurze oder bedeutungslose Chunks überspringen
         if len(raw.strip()) < 40:
             continue
+
+        # In-Chunk-Validierung: Überschriften-Kontext bei Paragraphen-Wechsel mittendrin updaten
+        found_section = _extract_section_heading(raw)
+        if found_section:
+            running_section = found_section
 
         meta = {
             "ects":           None,
@@ -341,7 +474,7 @@ def _chunks_from_prose(
             "source_type":    "curriculum_pdf",
             "study_program":  study_program,
             "overview_level": "overview",
-            "section":        section,
+            "section":        running_section,
             "lva_code":       None,
         }
 
@@ -360,55 +493,57 @@ def chunk_curriculum_pdf(
     study_program: str,
 ) -> list[dict]:
     """
-    Hauptfunktion: Verarbeitet ein Curriculum-PDF und gibt eine Liste von
-    Chunks mit Web-Chunk-kompatiblen Metadaten zurück.
-
-    Jeder Chunk ist ein dict:
-      {
-        "content":  str,   # Text für Embedding
-        "metadata": dict,  # Web-Chunk-kompatible Metadaten
-      }
-
-    :param pdf_bytes:     Rohe PDF-Bytes
-    :param degree:        z.B. "Bachelor" oder "Master"
-    :param study_program: z.B. "Wirtschaftsinformatik"
-    :returns:             Liste von Chunk-Dicts, bereit für Embedding + Supabase-Insert
+    Hauptfunktion: Orchestriert den gesamten Parsing-Prozess des JKU-Curriculums.
+    Trennt Tabellen von Prosa, sichert seitenübergreifenden Kontext und injiziert Meta-Indizes.
     """
     all_chunks: list[dict] = []
     current_section = ""
+    prev_text_end = ""  # Sichert den Text-Kontext der Vorseite bei seitenübergreifenden Modulen
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page_num, page in enumerate(pdf.pages, 1):
             raw_text = page.extract_text() or ""
 
-            # Inhaltsverzeichnis-Seiten überspringen
+            # Inhaltsverzeichnisse über Punkt-Muster-Frequenz erkennen und überspringen
             if raw_text.count(_TOC_MARKER) > _TOC_THRESHOLD:
+                prev_text_end = raw_text[-200:] if raw_text else ""
                 continue
 
-            # Aktuellen §-Abschnitt aus Seitentext ermitteln
+            # Rechtlichen Paragraph-Kontext bestimmen
             section = _detect_section_context(raw_text, current_section)
             current_section = section
 
-            # ── Echte Tabellen (lines_strict) zuerst ─────────────────────
+            # ── Echte Tabellen (lines_strict) zuerst verarbeiten ─────────────────────
             tables = page.find_tables(table_settings=TABLE_SETTINGS_LINES)
-
-            processed_table_regions = []  # BBoxen der Tabellen merken
+            processed_table_regions = []
 
             for t_idx, table_obj in enumerate(tables):
                 table_data = table_obj.extract()
                 if not table_data or not table_data[0]:
                     continue
 
-                # Übersichtstabellen ohne Code (z.B. Seite 7: nur Bezeichnung+ECTS)
-                # → als einzelnen Übersichts-Prose-Chunk, nicht zeilenweise
+                # Typ-Weiche 1: Semesterpläne extrahieren
+                if _is_semester_table(table_data):
+                    chunk = _semester_table_to_chunk(
+                        table_data, section, degree, study_program
+                    )
+                    if chunk:
+                        all_chunks.append(chunk)
+                    processed_table_regions.append(table_obj.bbox)
+                    continue
+
+                # Typ-Weiche 2: Übergeordnete Fach-Übersichtstabellen verarbeiten
                 if _is_overview_table(table_data):
-                    overview_text = _overview_table_to_text(table_data, section, degree, study_program)
+                    overview_text = _overview_table_to_text(
+                        table_data, section, degree, study_program
+                    )
                     if overview_text:
                         all_chunks.append({
                             "content": overview_text,
                             "metadata": {
-                                "ects": None, "degree": degree, "lva_name": None,
-                                "has_table": True, "chunk_type": "overview_table",
+                                "ects": None, "degree": degree,
+                                "lva_name": None, "has_table": True,
+                                "chunk_type": "overview_table",
                                 "source_url": None, "course_name": None,
                                 "course_type": None, "module_name": None,
                                 "source_type": "curriculum_pdf",
@@ -420,7 +555,7 @@ def chunk_curriculum_pdf(
                     processed_table_regions.append(table_obj.bbox)
                     continue
 
-                # Text direkt über dieser Tabelle für module_name-Erkennung
+                # Typ-Weiche 3: Detaillierte LVA-Tabellen parsen
                 x0, top, x1, bottom = table_obj.bbox
                 text_above = ""
                 if top > 0:
@@ -430,7 +565,10 @@ def chunk_curriculum_pdf(
                     except Exception:
                         text_above = raw_text
 
+                # Modulbezeichnung im Textbereich oberhalb oder auf der Vorseite detektieren
                 module_name = _detect_module_context(text_above)
+                if not module_name and prev_text_end:
+                    module_name = _detect_module_context(prev_text_end)
 
                 table_chunks = _chunks_from_table(
                     table_data,
@@ -442,9 +580,10 @@ def chunk_curriculum_pdf(
                 all_chunks.extend(table_chunks)
                 processed_table_regions.append(table_obj.bbox)
 
-            # ── Fließtext (Bereiche außerhalb der Tabellen) ───────────────
-            # Text der Seite, aber ohne die bereits verarbeiteten Tabellenbereiche
-            prose_text = _extract_prose_only(page, processed_table_regions, raw_text)
+            # ── Fließtext extrahieren (Bereiche außerhalb bereits geparster Tabellen) ──
+            prose_text = _extract_prose_only(
+                page, processed_table_regions, raw_text
+            )
 
             prose_chunks = _chunks_from_prose(
                 prose_text,
@@ -454,7 +593,10 @@ def chunk_curriculum_pdf(
             )
             all_chunks.extend(prose_chunks)
 
-    # Chunk-Index nachträglich setzen
+            # Historie für die darauffolgende Seite puffern
+            prev_text_end = raw_text[-200:] if raw_text else ""
+
+    # Globalen, fortlaufenden Chunk-Index über alle Generate hinweg setzen
     for i, chunk in enumerate(all_chunks):
         chunk["metadata"]["chunk_index"] = i
 
@@ -463,10 +605,8 @@ def chunk_curriculum_pdf(
 
 def _extract_prose_only(page, table_bboxes: list, fallback_text: str) -> str:
     """
-    Extrahiert nur den Fließtext einer Seite, ohne die Tabellenbereiche.
-
-    Für Seiten ohne Tabellen wird der rohe Seitentext zurückgegeben.
-    Für Seiten mit Tabellen werden die entsprechenden Regionen ausgeschnitten.
+    Schneidet die erkannten Tabellen-Bounding-Boxes (Bboxes) geometrisch aus der PDF-Seite 
+    heraus, um Textdopplungen in Fließtext-Chunks sauber zu verhindern.
     """
     if not table_bboxes:
         return fallback_text
@@ -474,6 +614,7 @@ def _extract_prose_only(page, table_bboxes: list, fallback_text: str) -> str:
     parts = []
     prev_bottom = 0
 
+    # Sortiertes vertikales Cropping zwischen den Tabellen-Grenzen
     for bbox in sorted(table_bboxes, key=lambda b: b[1]):
         x0, top, x1, bottom = bbox
         if top > prev_bottom:
@@ -483,7 +624,7 @@ def _extract_prose_only(page, table_bboxes: list, fallback_text: str) -> str:
                 parts.append(text)
         prev_bottom = bottom
 
-    # Text nach der letzten Tabelle
+    # Letzten Absatz nach der letzten Tabelle sichern
     if prev_bottom < page.height:
         region = page.crop((0, prev_bottom, page.width, page.height))
         text = region.extract_text()

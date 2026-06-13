@@ -60,8 +60,8 @@ TABLE_SETTINGS_TEXT = {
 
 def table_to_markdown(table: list) -> str:
     """
-    Wandelt eine pdfplumber-Tabelle in einen Markdown-Tabellenstring um.
-    Forward-Fill fuer zusammengefuehrte Zellen (Merged Cells).
+    Konvertiert eine pdfplumber-Tabelle in ein Markdown-Format.
+    Nutzt Forward-Fill, um leere Zellen nach Merged Cells mit dem letzten Wert zu füllen.
     """
     if not table or not table[0]:
         return ""
@@ -93,8 +93,8 @@ def table_to_markdown(table: list) -> str:
 
 def detect_two_column_layout(page) -> bool:
     """
-    Erkennt ob eine PDF-Seite ein zweispaltiges Layout hat.
-    Prueft ob mindestens 30% der Woerter links und 30% rechts der Seitenmitte stehen.
+    Prüft anhand der Wortverteilung (mind. 30% links und rechts der Mitte mit Margin),
+    ob die PDF-Seite ein zweispaltiges Layout besitzt.
     """
     words = page.extract_words()
     if not words or len(words) < 10:
@@ -113,15 +113,18 @@ def detect_two_column_layout(page) -> bool:
 
 
 def _extract_column_content(col_page) -> str:
-    """Extrahiert Text und Tabellen aus einem zugeschnittenen Spalten-Bereich."""
+    """
+    Extrahiert Text und Tabellen aus einem vordefinierten, zugeschnittenen Spaltenbereich.
+    """
     return _extract_regions(col_page)
 
 
 def _extract_regions(page) -> str:
     """
-    Kernlogik der Seitenextraktion: Text und Tabellen in Leserichtung kombinieren.
-    Versucht zuerst Linien-Erkennung, faellt auf Text-basierte Erkennung zurueck.
+    Extrahiert Text und Tabellen einer Seite chronologisch in Leserichtung von oben nach unten.
+    Vermeidet Textdopplungen durch horizontales Zuschneiden (Cropping) zwischen den Tabellen.
     """
+    # 1. Versuche Tabellen über Linien zu finden, Fallback auf textbasierte Erkennung
     table_objects = page.find_tables(table_settings=TABLE_SETTINGS_LINES)
     if not table_objects:
         table_objects = page.find_tables(table_settings=TABLE_SETTINGS_TEXT)
@@ -129,33 +132,39 @@ def _extract_regions(page) -> str:
     if not table_objects:
         return page.extract_text() or ""
 
+    # Tabellen von oben nach unten sortieren
     sorted_tables = sorted(table_objects, key=lambda t: t.bbox[1])
     regions = []
     prev_bottom = 0
 
+    # 2. Iteriere durch Tabellen und extrahiere den Text jeweils DAZWISCHEN
     for table_obj in sorted_tables:
         x0, top, x1, bottom = table_obj.bbox
         top    = max(top, prev_bottom)
         bottom = min(bottom, page.height)
 
+        # Reiner Textbereich über der aktuellen Tabelle extrahieren
         if top > prev_bottom:
             text_region = page.crop((0, prev_bottom, page.width, top))
             text = text_region.extract_text()
             if text and text.strip():
                 regions.append(("text", text))
 
+        # Tabellendaten sichern
         table_data = table_obj.extract()
         if table_data:
             regions.append(("table", table_data))
 
         prev_bottom = bottom
 
+    # 3. Letzten Textabschnitt unter der letzten Tabelle extrahieren
     if prev_bottom < page.height:
         text_region = page.crop((0, prev_bottom, page.width, page.height))
         text = text_region.extract_text()
         if text and text.strip():
             regions.append(("text", text))
 
+    # 4. Regionen zusammenführen und Tabellen in Markdown übersetzen
     parts = []
     for kind, content in regions:
         if kind == "text":
@@ -170,8 +179,8 @@ def _extract_regions(page) -> str:
 
 def extract_page_content(page) -> str:
     """
-    Extrahiert den vollstaendigen Inhalt einer PDF-Seite in korrekter Leserichtung.
-    Erkennt automatisch zweispaltige Layouts.
+    Steuert die Seitenextraktion: Splittet zweispaltige Layouts in zwei Spalten-Objekte
+    oder verarbeitet die Seite direkt einspaltig.
     """
     if detect_two_column_layout(page):
         try:
@@ -183,7 +192,7 @@ def extract_page_content(page) -> str:
                 _extract_regions(right_col),
             ]))
         except Exception:
-            # Bounding-Box-Fehler bei manchen PDFs -> Fallback auf einspaltige Extraktion
+            # Fallback bei Bounding-Box-Fehlern (z.B. beschädigte PDFs)
             pass
 
     return _extract_regions(page)
@@ -191,7 +200,7 @@ def extract_page_content(page) -> str:
 
 def extract_section_heading(text: str) -> Optional[str]:
     """
-    Erkennt die erste Abschnittsueberschrift aus dem Rohtext einer Seite.
+    Scannt die ersten Zeilen einer Seite nach Mustern für Überschriften (z.B. '§ 1', '1.1' oder UPPERCASE).
     """
     if not text:
         return None
@@ -214,8 +223,8 @@ def extract_section_heading(text: str) -> Optional[str]:
 
 def erkennen_abschlussart(pdf_bytes: bytes) -> Optional[str]:
     """
-    Erkennt automatisch die Abschlussart eines Studiums aus dem PDF-Inhalt.
-    Durchsucht die ersten 5 Seiten nach Schluesselwoertern.
+    Identifiziert die Abschlussart (Bachelor, Master etc.) per Regex-Häufigkeitszählung
+    auf den ersten 5 Seiten des PDFs.
     """
     import pdfplumber
 
@@ -238,7 +247,7 @@ def erkennen_abschlussart(pdf_bytes: bytes) -> Optional[str]:
 
 def get_or_create_study_program(code: str, name: str, degree_type: Optional[str] = None) -> str:
     """
-    Gibt die UUID eines Studiengangs zurueck. Legt ihn an, falls er noch nicht existiert.
+    Gibt die UUID eines Studiengangs aus Supabase zurück oder legt ihn neu an, falls nicht vorhanden.
     """
     result = supabase.table("study_programs").select("id").eq("code", code).execute()
     if result.data:
@@ -253,7 +262,9 @@ def get_or_create_study_program(code: str, name: str, degree_type: Optional[str]
 
 
 def document_exists(filename: str, study_program_id: str) -> bool:
-    """Prueft ob ein PDF fuer diesen Studiengang bereits in der Datenbank ist."""
+    """
+    Prüft via Duplikatcheck in Supabase, ob die Datei für den Studiengang bereits existiert.
+    """
     result = (
         supabase.table("documents")
         .select("id")
@@ -270,16 +281,15 @@ def document_exists(filename: str, study_program_id: str) -> bool:
 
 def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id: str) -> int:
     """
-    Verarbeitet ein Curriculum-PDF vollstaendig und speichert alle Daten in Supabase.
-    NUR fuer Admin-Nutzung.
-
-    :returns: Anzahl der erstellten Chunks
+    Admin-Funktion: Lädt das PDF in den Storage, extrahiert den Inhalt seitenweise,
+    unterteilt ihn generisch in Chunks, generiert Vektor-Embeddings und speichert alles in Supabase.
     """
     import pdfplumber
 
     if document_exists(filename, study_program_id):
         raise ValueError(f"'{filename}' wurde fuer diesen Studiengang bereits hochgeladen.")
 
+    # 1. Datei-Upload in Supabase Storage S3-Bucket
     program = supabase.table("study_programs").select("code").eq("id", study_program_id).execute()
     program_code = program.data[0]["code"].replace("/", "-") if program.data else "allgemein"
     bucket_path  = f"{program_code}/{filename}"
@@ -290,6 +300,7 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
         file_options={"content-type": "application/pdf", "upsert": "true"},
     )
 
+    # 2. Dokument-Eintrag ("processing") erstellen
     doc_result = supabase.table("documents").insert({
         "user_id":          user_id,
         "filename":         filename,
@@ -302,11 +313,12 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
     try:
         chunks_with_meta = []
 
+        # 3. Seitenweise Text extrahieren & filtern (z.B. Inhaltsverzeichnisse ausschließen)
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
                 page_text_raw = page.extract_text() or ""
 
-                if page_text_raw.count(". .") > 8:
+                if page_text_raw.count(". .") > 8: # Überspringe typische JKU-Inhaltsverzeichnisse
                     continue
 
                 combined = extract_page_content(page)
@@ -316,6 +328,7 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
                 heading        = extract_section_heading(page_text_raw)
                 page_has_table = "|" in combined
 
+                # 4. Text in kleinere Chunks spalten und Typen klassifizieren
                 for chunk in chunk_text(combined):
                     chunk_has_table = "|" in chunk
                     chunk_type = (
@@ -331,9 +344,11 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
                         "chunk_type":      chunk_type,
                     })
 
+        # 5. Massen-Embeddings über den EmbeddingService anfordern
         embed_service = EmbeddingService()
         embeddings    = embed_service.embed_texts([c["content"] for c in chunks_with_meta])
 
+        # 6. Chunks inkl. Vektoren in Supabase inserten
         for i, (chunk_meta, vector) in enumerate(zip(chunks_with_meta, embeddings)):
             supabase.table("chunks").insert({
                 "document_id": document_id,
@@ -351,6 +366,7 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
                 },
             }).execute()
 
+        # Status erfolgreich updaten
         supabase.table("documents").update({"status": "processed"}).eq("id", document_id).execute()
 
     except Exception as e:
@@ -359,11 +375,9 @@ def process_pdf(pdf_bytes: bytes, filename: str, study_program_id: str, user_id:
 
     return len(chunks_with_meta)
 
+
 # ===============================================================================
 # ADMIN-PIPELINE: Curriculum-PDF mit strukturierten Metadaten
-# ===============================================================================
-# DIESEN BLOCK am Ende von pipeline.py einfügen (vor process_ics).
-# process_pdf() bleibt vollständig unverändert.
 # ===============================================================================
 
 def process_pdf_curriculum(
@@ -375,23 +389,12 @@ def process_pdf_curriculum(
     study_program: str,
 ) -> int:
     """
-    Verarbeitet ein Curriculum-PDF mit web-chunk-kompatiblen Metadaten.
-
-    Nutzt pdf_chunking.py statt der generischen chunking.py-Logik.
-    Alle anderen Schritte (Supabase-Upload, Embedding) bleiben identisch
-    zu process_pdf().
-
-    :param pdf_bytes:     Rohe PDF-Bytes
-    :param filename:      Dateiname für Metadaten und Duplikat-Check
-    :param program_id:    UUID des Studiengangs in study_programs
-    :param user_id:       UUID des Admin-Users
-    :param degree:        "Bachelor" oder "Master"
-    :param study_program: z.B. "Wirtschaftsinformatik"
-    :returns:             Anzahl gespeicherter Chunks
+    Spezialisierte Admin-Funktion: Verarbeitet Curriculum-PDFs mittels intelligenterem,
+    strukturiertem JKU-Curriculum-Chunking (`pdf_chunking.py`). Verknüpft direkt Studienrichtung & Grad.
     """
     from pdf_chunking import chunk_curriculum_pdf
 
-    # ── Duplikat-Check (identisch zu process_pdf) ─────────────────────────────
+    # 1. Duplikat-Check
     existing = (
         supabase.table("documents")
         .select("id")
@@ -402,7 +405,7 @@ def process_pdf_curriculum(
     if existing.data:
         raise ValueError(f"PDF '{filename}' wurde bereits verarbeitet.")
 
-    # ── Dokument in documents-Tabelle anlegen ──────────────────────────────────
+    # 2. Dokumentenstatus initialisieren
     doc_result = supabase.table("documents").insert({
         "filename":         filename,
         "user_id":      user_id,
@@ -412,20 +415,19 @@ def process_pdf_curriculum(
     document_id = doc_result.data[0]["id"]
 
     try:
-        # ── Chunks mit strukturierten Metadaten erzeugen ───────────────────────
+        # 3. Strukturiertes Chunking speziell für Curricula ausführen
         chunks = chunk_curriculum_pdf(pdf_bytes, degree=degree, study_program=study_program)
 
         if not chunks:
             raise ValueError("Keine Chunks erzeugt – PDF leer oder nicht lesbar.")
 
-        # ── Embeddings generieren ──────────────────────────────────────────────
+        # 4. Embeddings generieren
         embed_service = EmbeddingService()
         texts = [c["content"] for c in chunks]
         embeddings = embed_service.embed_texts(texts)
 
-        # ── Chunks in Supabase speichern ───────────────────────────────────────
+        # 5. Speichern mit erweiterten, strukturierten Metadaten für das Web-UI
         for i, (chunk, vector) in enumerate(zip(chunks, embeddings)):
-            # Metadaten mit Pflichtfeldern anreichern
             meta = {
                 **chunk["metadata"],
                 "source_filename": filename,
@@ -449,19 +451,20 @@ def process_pdf_curriculum(
 
     return len(chunks)
 
+
 # ===============================================================================
 # USER-PIPELINE: ICS-Kalender
 # ===============================================================================
 
 def process_ics(ics_bytes: bytes, filename: str, user_id: str) -> int:
     """
-    Verarbeitet eine KUSSS-ICS-Datei und speichert Events in der events-Tabelle.
-
-    :returns: Anzahl importierter Events
+    User-Funktion: Schreibt JKU KUSSS-Kalendertermine über eine temporäre Datei
+    mittels der `ingest_ics`-Logik in die Supabase 'events'-Tabelle.
     """
     import tempfile
     from ingest_ics import ingest_ics
 
+    # Temporäre Datei erzeugen, um dem Parser einen lokalen Dateipfad zu übergeben
     with tempfile.NamedTemporaryFile(suffix=".ics", delete=False) as tmp:
         tmp.write(ics_bytes)
         tmp_path = tmp.name
@@ -469,53 +472,16 @@ def process_ics(ics_bytes: bytes, filename: str, user_id: str) -> int:
     try:
         ingest_ics(tmp_path, user_id)
     finally:
-        os.unlink(tmp_path)
+        os.unlink(tmp_path) # Tempfile nach Verarbeitung sauber löschen
 
     result = supabase.table("events").select("id", count="exact").eq("user_id", user_id).execute()
     return result.count or 0
 
 
-# ===============================================================================
-# USER-PIPELINE: Studienerfolg (Noten-Nachweis)
-# ===============================================================================
-
-_NOTE_LABELS = {
-    1: "Sehr Gut", 2: "Gut", 3: "Befriedigend", 4: "Genuegend", 5: "Nicht Genuegend",
-}
-
-
-def _parse_grade_rows_from_text(text: str) -> list[dict]:
-    """
-    Extrahiert Noten-Eintraege aus dem Rohtext eines KUSSS-Studienerfolgs (PDF).
-    """
-    row_pattern = re.compile(
-        r'(?m)^(\d{3}\.\d{3})\s+'
-        r'(.+?)\s+'
-        r'(\d+[.,]\d+|\d+)\s+'
-        r'(\w+)\s+'
-        r'([1-5])\s+'
-        r'(\d{2}\.\d{2}\.\d{4})'
-    )
-    rows = []
-    for m in row_pattern.finditer(text):
-        ects_raw = m.group(3).replace(",", ".")
-        grade    = int(m.group(5))
-        rows.append({
-            "course_code":  m.group(1),
-            "course_name":  m.group(2).strip(),
-            "ects":         float(ects_raw),
-            "course_type":  m.group(4),
-            "grade":        grade,
-            "grade_label":  _NOTE_LABELS.get(grade),
-            "passed":       grade <= 4,
-            "exam_date":    m.group(6),
-        })
-    return rows
-
-
 def _parse_grade_rows_from_csv(text: str) -> list[dict]:
     """
-    Extrahiert Noten-Eintraege aus einem KUSSS-CSV-Export (Semikolon-getrennt).
+    User-Hilfsfunktion: Parst einen KUSSS-Notenexport im CSV-Format (Semikolon-separiert)
+    und bereitet die Spalten vereinheitlicht für das Datenbank-Schema vor.
     """
     import csv
 
@@ -548,7 +514,10 @@ def _parse_grade_rows_from_csv(text: str) -> list[dict]:
 
 
 def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """Extrahiert den gesamten Rohtext aus einem PDF (alle Seiten zusammengefuehrt)."""
+    """
+    User-Hilfsfunktion: Extrahiert den rohen, unstrukturierten Text aller PDF-Seiten
+    ohne Tabellenerkennung als einfachen String.
+    """
     import pdfplumber
     text = ""
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -559,7 +528,8 @@ def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
 
 def _upsert_grades(grades: list[dict], user_id: str) -> int:
     """
-    Speichert Noten-Eintraege in completed_courses (Upsert per user_id + lva_nr).
+    User-Hilfsfunktion: Führt ein Upsert für Noten in 'completed_courses' durch.
+    Verhindert Duplikate bei mehrfachem Upload durch Unique-Constraint (user_id + lva_nr).
     """
     success = 0
     for grade in grades:
@@ -584,36 +554,131 @@ def _upsert_grades(grades: list[dict], user_id: str) -> int:
     return success
 
 
+def _parse_grade_rows_from_text(text: str) -> list[dict]:
+    """
+    FALLBACK: Altes Regex-basiertes Textparsing für Noten.
+    Dient nur noch als Sicherheitsnetz, falls die Tabellenextraktion versagt.
+    """
+    return []
+
+
+def _parse_studienerfolg_pdf_tables(pdf_bytes: bytes) -> list[dict]:
+    """
+    User-Hilfsfunktion: Parst das KUSSS-Erfolgsnachweis-PDF gezielt über Tabellenstrukturen.
+    Extrahiert Kursname, LVA-Nummer, Typ, ECTS, Datum und Note aus der 6-Spalten-Matrix.
+    """
+    import pdfplumber
+
+    GRADE_MAP = {
+        "sehr gut": 1,
+        "gut": 2,
+        "befriedigend": 3,
+        "genügend": 4,
+        "nicht genügend": 5,
+    }
+    LVA_TYPES = {"VK", "VL", "UE", "KS", "KV", "SE", "PR", "PJ", "KT", "PS"}
+
+    rows = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            tables = page.find_tables(table_settings=TABLE_SETTINGS_LINES)
+            for table_obj in tables:
+                table_data = table_obj.extract()
+                # Validierung: Nur echte KUSSS-Notentabellen haben exakt 6 Spalten
+                if not table_data or len(table_data[0]) != 6:
+                    continue
+
+                for raw_row in table_data:
+                    if not raw_row or len(raw_row) < 6:
+                        continue
+
+                    # Zeilen ohne gültigen LVA-Typ (z.B. Tabellen-Header) überspringen
+                    typ = str(raw_row[1] or "").strip()
+                    if typ not in LVA_TYPES:
+                        continue
+
+                    # ── Kursname + LVA-Nr aus Spalte 0 isolieren ─────────────────
+                    cell0 = str(raw_row[0] or "")
+                    lines = cell0.split("\n")
+                    course_name = lines[0].strip()
+
+                    lva_nr = ""
+                    course_code = ""
+                    if len(lines) > 1:
+                        second_line = lines[1].strip()
+                        # Extrahiere numerische LVA-Nr (z.B. 259.016)
+                        nr_match = re.search(r'(\d{3}\.\S+)', second_line)
+                        if nr_match:
+                            lva_nr = nr_match.group(1)
+                        # Alphanumerischen Äquivalenz-Code sichern
+                        code_match = re.match(r'(\S+)', second_line)
+                        if code_match:
+                            course_code = code_match.group(1)
+
+                    effective_lva_nr = lva_nr or course_code
+
+                    # ── ECTS, Datum und Note parsen & mappen ─────────────────────
+                    try:
+                        ects = float(str(raw_row[3] or "0").replace(",", "."))
+                    except ValueError:
+                        continue
+
+                    datum = str(raw_row[4] or "").replace("\n", "").strip()
+
+                    note_raw = str(raw_row[5] or "").replace("\n", " ").strip()
+                    note_lower = note_raw.lower()
+                    grade = GRADE_MAP.get(note_lower)
+                    
+                    # Kurs ist bestanden bei "mit erfolg teilgenommen" ODER Note 1-4
+                    passed = note_lower == "mit erfolg teilgenommen" or (grade is not None and grade <= 4)
+
+                    rows.append({
+                        "course_code":  effective_lva_nr,
+                        "course_name":  course_name,
+                        "ects":         ects,
+                        "course_type":  typ,
+                        "grade":        grade,
+                        "grade_label":  note_raw,
+                        "passed":       passed,
+                        "exam_date":    datum,
+                    })
+
+    return rows
+
+
 def process_studienerfolg(file_bytes: bytes, filename: str, user_id: str) -> dict:
     """
-    Verarbeitet den KUSSS-Studienerfolg (Notennachweis) eines Studenten.
-
-    Unterstuetzte Formate: PDF, CSV
-    Speichert Noten in completed_courses (RLS-geschuetzt, nur eigene Daten sichtbar).
-
-    :returns: Dict mit total/passed/failed/ects_total fuer das Frontend
+    User-Hauptfunktion: Steuert den Studienerfolgs-Import für Studierende. Splittet nach Dateiendung (PDF/CSV),
+    startet das jeweilige Parsing, triggert den Datenbank-Upsert und berechnet ein Statistik-Summary.
     """
     ext = filename.rsplit(".", 1)[-1].lower()
 
     if ext == "pdf":
-        raw_text = _extract_text_from_pdf(file_bytes)
-        grades   = _parse_grade_rows_from_text(raw_text)
+        # Versuche primär die saubere Tabellenextraktion
+        grades = _parse_studienerfolg_pdf_tables(file_bytes)
+        if not grades:
+            # Fallback bei stark formatierten/unbekannten PDF-Dateien
+            raw_text = _extract_text_from_pdf(file_bytes)
+            grades = _parse_grade_rows_from_text(raw_text)
     elif ext == "csv":
         raw_text = file_bytes.decode("utf-8-sig", errors="replace")
-        grades   = _parse_grade_rows_from_csv(raw_text)
+        grades = _parse_grade_rows_from_csv(raw_text)
     else:
         raise ValueError(f"Unbekanntes Dateiformat: '{ext}'. Bitte PDF oder CSV hochladen.")
 
     if not grades:
         raise ValueError(
-            "Keine Noten-Eintraege gefunden. "
-            "Stelle sicher, dass du den offiziellen KUSSS-Studienerfolg hochlaedst."
+            "Keine Noten-Einträge gefunden. "
+            "Stelle sicher, dass du den offiziellen KUSSS-Studienerfolg hochlädst."
         )
 
-    saved         = _upsert_grades(grades, user_id)
+    # In Datenbank sichern
+    saved = _upsert_grades(grades, user_id)
+    
+    # Statistiken für den API-Response berechnen
     passed_grades = [g for g in grades if g["passed"]]
     failed_grades = [g for g in grades if not g["passed"]]
-    ects_total    = sum(g["ects"] for g in passed_grades)
+    ects_total = sum(g["ects"] for g in passed_grades)
 
     return {
         "total":      len(grades),
