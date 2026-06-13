@@ -4,12 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="33371708-1a0f-4c33-9373-f2b16cd2347e" name="Changes" comment="Improve LVA details page chunking">
+    <list default="true" id="33371708-1a0f-4c33-9373-f2b16cd2347e" name="Changes" comment="Fix handbook overview parsing and Lernergebnisse chunking">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/chunking.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/chunking.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/data/handbooks.json" beforeDir="false" afterPath="$PROJECT_DIR$/app/data/handbooks.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/handbook_scraper.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/handbook_scraper.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/search.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/search.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -111,7 +108,15 @@
       <option name="project" value="LOCAL" />
       <updated>1779137467737</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="Fix handbook overview parsing and Lernergebnisse chunking">
+      <option name="closed" value="true" />
+      <created>1781292223638</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1781292223638</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="UnknownFeatures">
@@ -122,6 +127,7 @@
     <MESSAGE value="Refactor overview chunking and add structured metadata" />
     <MESSAGE value="Formating/commenting" />
     <MESSAGE value="Improve LVA details page chunking" />
-    <option name="LAST_COMMIT_MESSAGE" value="Improve LVA details page chunking" />
+    <MESSAGE value="Fix handbook overview parsing and Lernergebnisse chunking" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fix handbook overview parsing and Lernergebnisse chunking" />
   </component>
 </project>
