@@ -46,6 +46,7 @@ def search_jku_knowledge(query_text: str, study_program_id: str = None, match_co
     """
     embed_service = EmbeddingService()
 
+    study_program_id = normalize_study_program_id(study_program_id)
     expanded_query = _expand_query(query_text)
 
     query_vector = embed_service.model.encode(

@@ -29,8 +29,6 @@ async def chat(data: dict):
             user_message,
             user_id="test-user",
             study_program_id=study_program_id,
-            schedule_ics=schedule_ics,
-            exams_ics=exams_ics,
         )
     except Exception as exc:
         print(f"POST /chat error: {exc}")
