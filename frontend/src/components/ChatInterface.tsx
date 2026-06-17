@@ -20,6 +20,13 @@ interface ChatInterfaceProps {
   onLogout: () => void;
 }
 
+interface StudyProgram {
+  id: string;
+  name: string;
+  degree_type: string;
+  chunk_count: number;
+}
+
 export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -45,7 +52,9 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
   const [examsFile, setExamsFile] = useState<File | null>(null);
   const [examsIcsText, setExamsIcsText] = useState<string | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const [studyProgram, setStudyProgram] = useState<'bachelor' | 'master'>('bachelor');
+  // Studiengaenge werden dynamisch vom Backend geladen (nur solche mit Inhalten in Supabase)
+  const [programs, setPrograms] = useState<StudyProgram[]>([]);
+  const [studyProgram, setStudyProgram] = useState<string>('');
 
   // KI-Schnittstelle: Arrays für Events, die vom AI Assistant befüllt werden können
   const [scheduleEvents, setScheduleEvents] = useState<Array<{
@@ -75,6 +84,22 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Studiengaenge einmalig beim Laden vom Backend holen und den ersten vorauswaehlen
+  useEffect(() => {
+    fetch('http://127.0.0.1:8000/programs')
+      .then((res) => res.json())
+      .then((data) => {
+        const list: StudyProgram[] = data.programs || [];
+        setPrograms(list);
+        if (list.length > 0) {
+          setStudyProgram(list[0].id);
+        }
+      })
+      .catch((err) => {
+        console.error('Programs konnten nicht geladen werden:', err);
+      });
+  }, []);
 
   const handleScheduleIcsUpload = (file: File) => {
     setScheduleFile(file);
@@ -126,8 +151,6 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
         body: JSON.stringify({
           message: inputText,
           study_program_id: studyProgram,
-          schedule_ics: scheduleIcsText,
-          exams_ics: examsIcsText,
         }),
       })
         .then((res) => res.json())
@@ -414,20 +437,19 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
             <form onSubmit={handleSendMessage}>
               <div className="mb-4 flex flex-wrap items-center gap-3">
                 <span className="text-sm text-gray-400">Studiengang:</span>
-                <button
-                  type="button"
-                  onClick={() => setStudyProgram('bachelor')}
-                  className={`px-4 py-2 rounded-2xl transition text-sm ${studyProgram === 'bachelor' ? 'bg-white text-black' : 'bg-white/5 text-gray-300 hover:bg-white/10'}`}
-                >
-                  Bachelor Wirtschaftsinformatik
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStudyProgram('master')}
-                  className={`px-4 py-2 rounded-2xl transition text-sm ${studyProgram === 'master' ? 'bg-white text-black' : 'bg-white/5 text-gray-300 hover:bg-white/10'}`}
-                >
-                  Master Wirtschaftsinformatik
-                </button>
+                {programs.length === 0 && (
+                  <span className="text-sm text-gray-500">Lade Studiengänge…</span>
+                )}
+                {programs.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setStudyProgram(p.id)}
+                    className={`px-4 py-2 rounded-2xl transition text-sm ${studyProgram === p.id ? 'bg-white text-black' : 'bg-white/5 text-gray-300 hover:bg-white/10'}`}
+                  >
+                    {p.degree_type} {p.name}
+                  </button>
+                ))}
               </div>
               <p className="text-xs text-gray-400 mb-3">
                 Der AI Assistant verwendet nur Inhalte aus dem gewählten Studiengang. iCal-Dateien für Stundenplan und Prüfungen werden zusätzlich verarbeitet.
