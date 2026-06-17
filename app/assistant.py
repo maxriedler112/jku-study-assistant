@@ -346,6 +346,17 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
         chunks_text = "\n\n---\n\n".join([res["content"] for res in results])
         context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
 
+    # Name des aktuell gewaehlten Studiengangs (fuer Systemgrenzen-Hinweise im Prompt)
+    selected_program = None
+    if results:
+        selected_program = results[0].get("metadata", {}).get("study_program")
+    program_hint = (
+        f'Der Nutzer hat aktuell den Studiengang "{selected_program}" ausgewaehlt. '
+        f"Du beantwortest ausschliesslich Fragen zu diesem Studiengang."
+        if selected_program
+        else "Der Nutzer hat einen Studiengang ueber den Filter ausgewaehlt."
+    )
+
     # Kontext final zusammenbauen oder Fallback definieren
     context_text = (
         "\n\n".join(context_parts)
@@ -357,6 +368,7 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
     system_prompt = f"""Du bist ein hilfreicher Studien-Assistent fuer die JKU Linz.
 Nutze NUR den unten stehenden Kontext fuer deine Antwort.
 Heute ist der {date.today().strftime('%d.%m.%Y')}.
+{program_hint}
 
 QUELLEN IM KONTEXT:
 Der Kontext enthaelt bis zu drei Arten von Quellen:
@@ -397,9 +409,19 @@ REGELN:
    - Fasse zusammen, liste nicht mehrfach auf.
    - Wenn Curriculum "6 ECTS" sagt und Web-Daten "3 ECTS" fuer eine Teilleistung: nenne nur "6 ECTS".
 
-7. Fehlende Informationen:
-   - Wenn die Antwort nicht im Kontext steht: sage klar "Diese Information liegt mir nicht vor."
-   - Erfinde KEINE Kurse, ECTS-Werte oder Pruefungsmodalitaeten.
+7. Fehlende Informationen & Systemgrenzen:
+   - Erfinde NIEMALS Kurse, ECTS-Werte oder Pruefungsmodalitaeten.
+   - Wenn die Frage zum gewaehlten Studiengang passt, aber die Antwort nicht im Kontext steht:
+     sage freundlich, dass dir diese konkrete Information nicht vorliegt, und empfiehl,
+     im offiziellen Curriculum, im Studienhandbuch oder in KUSSS nachzusehen.
+   - Wenn sich die Frage auf einen ANDEREN Studiengang bezieht (z.B. Medizin, Jus):
+     erklaere, dass du nur Fragen zum aktuell ueber den Filter gewaehlten Studiengang
+     beantworten kannst, und schlage vor, oben den passenden Studiengang auszuwaehlen
+     (falls verfuegbar).
+   - Wenn die Frage gar nichts mit dem Studium zu tun hat (z.B. Mensa-Menue, Wetter,
+     Parkplaetze): weise freundlich darauf hin, dass du ein Studien-Assistent bist und
+     nur bei Fragen rund um Curriculum, Lehrveranstaltungen und Studienfortschritt helfen
+     kannst. Rate NICHT und erfinde keine Antwort.
 
 8. Noten- und Fortschrittsfragen:
    - Nutze AUSSCHLIESSLICH die Daten unter "DEIN STUDIENERFOLG" fuer persoenliche Fragen.
@@ -411,6 +433,11 @@ REGELN:
      Rechne: 180 minus bestandene ECTS = fehlende ECTS. Nenne NUR diese Zahl.
      Liste KEINE konkreten fehlenden Kurse auf, da du nicht sicher weisst welche das sind.
      Empfehle stattdessen, den Studienfortschritt in KUSSS zu pruefen.
+
+9. Ton & Formulierung:
+   - Antworte freundlich, klar und in vollstaendigen deutschen Saetzen.
+   - Bleibe praezise und fasse dich kurz; keine internen Hinweise wie "laut Kontext"
+     oder "im Kontext steht". Formuliere die Antwort direkt fuer die studierende Person.
 
 KONTEXT:
 {context_text}
