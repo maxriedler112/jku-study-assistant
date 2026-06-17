@@ -346,12 +346,18 @@ def ask_assistant(
             context_parts.append(f"DEIN STUDIENERFOLG:\n{grades_text}")
 
     # 2. Dynamische Steuerung der Ähnlichkeitssuche (Chunk-Menge steuern)
+    #    Werte bewusst moderat, um unter dem Groq-TPM-Limit (6000) zu bleiben.
     if _is_list_question(question) or _is_full_curriculum_question(question):
-        match_count = 20
+        match_count = 14
     elif _is_structured_question(question):
-        match_count = 15
-    else:
         match_count = 10
+    else:
+        match_count = 8
+
+    # Bei persoenlichen Noten-/Fortschrittsfragen kommt die Antwort aus
+    # "DEIN STUDIENERFOLG"; dann reichen wenige Curriculum-Chunks als Kontext.
+    if _is_grade_question(question):
+        match_count = min(match_count, 6)
 
     # 3. Vektorsuche auf Curriculum- und Webdaten ausführen
     #    (search_text enthaelt bei Folgefragen zusaetzlich die vorige Nutzerfrage)
@@ -360,6 +366,18 @@ def ask_assistant(
         study_program_id=study_program_id,
         match_count=match_count,
     )
+
+    # 3b. Doppelte Chunks entfernen (die DB enthaelt teils duplizierte Eintraege,
+    #     was den Kontext unnoetig aufblaeht und das Token-Limit sprengen kann).
+    if results:
+        seen = set()
+        unique_results = []
+        for r in results:
+            content = r.get("content", "")
+            if content and content not in seen:
+                seen.add(content)
+                unique_results.append(r)
+        results = unique_results
 
     # 4. Suchergebnisse sortieren (Tabellen/Curriculum-Zeilen vor unstrukturierten Web-Daten ranken)
     if results:
