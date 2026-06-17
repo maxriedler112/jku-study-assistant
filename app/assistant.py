@@ -301,12 +301,31 @@ def _is_grade_question(question: str) -> bool:
     return any(kw in q_lower for kw in grade_keywords)
 
 
-def ask_assistant(question: str, user_id: str = None, study_program_id: str = None) -> str:
+def ask_assistant(
+    question: str,
+    user_id: str = None,
+    study_program_id: str = None,
+    history: list[dict] = None,
+) -> str:
     """
-    Zentrale RAG-Pipeline: Analysiert den Fragetyp, füttert den Kontext 
-    dynamisch aus relationalen DB-Daten (Kalender, Noten) sowie der Vektordatenbank 
+    Zentrale RAG-Pipeline: Analysiert den Fragetyp, füttert den Kontext
+    dynamisch aus relationalen DB-Daten (Kalender, Noten) sowie der Vektordatenbank
     (Curriculum-Wissen) und generiert die finale Antwort über Groq (Llama 3.1).
+
+    history: optionale bisherige Konversation als Liste von
+    {"role": "user"|"assistant", "content": str}. Wird dem LLM mitgegeben, damit
+    Folgefragen ("In welchem Semester wird ES empfohlen?") aufgeloest werden koennen.
     """
+    history = history or []
+
+    # Letzte Nutzerfrage aus der Historie ermitteln (verbessert das Retrieval bei
+    # Folgefragen, die ohne Kontext mehrdeutig sind).
+    last_user_turn = next(
+        (m.get("content", "") for m in reversed(history) if m.get("role") == "user"),
+        "",
+    )
+    search_text = f"{last_user_turn} {question}".strip() if last_user_turn else question
+
     context_parts = []
 
     # 1a. Zeitbasierte Frage → Persönliche KUSSS-Termine einspeisen
@@ -330,8 +349,9 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
         match_count = 10
 
     # 3. Vektorsuche auf Curriculum- und Webdaten ausführen
+    #    (search_text enthaelt bei Folgefragen zusaetzlich die vorige Nutzerfrage)
     results = search_jku_knowledge(
-        question,
+        search_text,
         study_program_id=study_program_id,
         match_count=match_count,
     )
@@ -443,12 +463,22 @@ KONTEXT:
 {context_text}
 """
 
-    # 5. API-Inferenz über Groq ausführen
+    # 5. Nachrichten zusammenbauen: System-Prompt + bisherige Historie + aktuelle Frage.
+    #    Nur die letzten Turns mitschicken, um das Token-Budget zu schonen.
+    recent_history = [
+        {"role": m["role"], "content": m["content"]}
+        for m in history[-6:]
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
+    messages = (
+        [{"role": "system", "content": system_prompt}]
+        + recent_history
+        + [{"role": "user", "content": question}]
+    )
+
+    # 6. API-Inferenz über Groq ausführen
     chat_completion = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ],
+        messages=messages,
         model="llama-3.1-8b-instant",
         temperature=0.2, # Niedrige Temperatur für geringe Halluzinationsanfälligkeit
     )

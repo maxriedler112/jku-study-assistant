@@ -34,13 +34,15 @@ def programs():
 async def chat(data: dict):
     user_message = data.get("message")
     study_program_id = data.get("study_program_id")
-    print(f"POST /chat received message: {user_message}, study_program_id: {study_program_id}")
+    history = data.get("history") or []
+    print(f"POST /chat received message: {user_message}, study_program_id: {study_program_id}, history_len: {len(history)}")
 
     try:
         response = ask_assistant(
             user_message,
             user_id="test-user",
             study_program_id=study_program_id,
+            history=history,
         )
     except Exception as exc:
         print(f"POST /chat error: {exc}")

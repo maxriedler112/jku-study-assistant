@@ -143,6 +143,15 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
 
       console.log('Chat send:', { inputText, attachedFiles });
 
+      // Bisherigen Verlauf als Historie mitschicken, damit Folgefragen
+      // (z.B. "in welchem Semester wird es empfohlen?") aufgeloest werden koennen.
+      const history = messages
+        .filter((m) => m.text)
+        .map((m) => ({
+          role: m.sender === 'user' ? 'user' : 'assistant',
+          content: m.text,
+        }));
+
       fetch('http://127.0.0.1:8000/chat', {
         method: 'POST',
         headers: {
@@ -151,6 +160,7 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
         body: JSON.stringify({
           message: inputText,
           study_program_id: studyProgram,
+          history,
         }),
       })
         .then((res) => res.json())
