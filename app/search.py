@@ -124,6 +124,13 @@ def _expand_query(query: str) -> str:
         "semester":          "Semester idealtypischer Studienverlauf",
         "studienverlauf":    "idealtypischer Studienverlauf Semester",
         "studienplan":       "idealtypischer Studienverlauf Studienplan Semester",
+
+        # ── Studiendauer (§ 5 Dauer und Gliederung) ──────────────────
+        "dauer":             "Dauer und Gliederung sechs Semester Regelstudienzeit Studiendauer",
+        "dauert":            "Dauer und Gliederung sechs Semester Regelstudienzeit Studiendauer",
+        "wie lange":         "Dauer und Gliederung sechs Semester Regelstudienzeit Studiendauer",
+        "wie viele semester": "Dauer und Gliederung sechs Semester Regelstudienzeit",
+        "regelstudienzeit":  "Dauer und Gliederung sechs Semester Regelstudienzeit",
         
         # ── Beurteilung / Lehrmethoden ───────────────────────────────
         "beurteilung":       "Beurteilungskriterien Pruefung Abschlussklausur",
