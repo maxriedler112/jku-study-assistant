@@ -296,17 +296,41 @@ def _is_grade_question(question: str) -> bool:
         "meine noten", "meine prüfungen", "meine ects",
         "wie stehe ich", "wie weit bin ich",
         "sehr gut", "genügend", "befriedigend",
+        # Umgangssprachliche "Habe ich X schon gemacht?"-Formulierungen (#11)
+        "hab ich", "habe ich", "hab ich schon", "habe ich schon",
+        "schon gemacht", "schon absolviert", "schon gehabt",
+        "bereits gemacht", "bereits absolviert", "schon belegt",
+        "absolviert", "abgeschlossen",
     ]
     q_lower = question.lower()
     return any(kw in q_lower for kw in grade_keywords)
 
 
-def ask_assistant(question: str, user_id: str = None, study_program_id: str = None) -> str:
+def ask_assistant(
+    question: str,
+    user_id: str = None,
+    study_program_id: str = None,
+    history: list[dict] = None,
+) -> str:
     """
-    Zentrale RAG-Pipeline: Analysiert den Fragetyp, füttert den Kontext 
-    dynamisch aus relationalen DB-Daten (Kalender, Noten) sowie der Vektordatenbank 
+    Zentrale RAG-Pipeline: Analysiert den Fragetyp, füttert den Kontext
+    dynamisch aus relationalen DB-Daten (Kalender, Noten) sowie der Vektordatenbank
     (Curriculum-Wissen) und generiert die finale Antwort über Groq (Llama 3.1).
+
+    history: optionale bisherige Konversation als Liste von
+    {"role": "user"|"assistant", "content": str}. Wird dem LLM mitgegeben, damit
+    Folgefragen ("In welchem Semester wird ES empfohlen?") aufgeloest werden koennen.
     """
+    history = history or []
+
+    # Letzte Nutzerfrage aus der Historie ermitteln (verbessert das Retrieval bei
+    # Folgefragen, die ohne Kontext mehrdeutig sind).
+    last_user_turn = next(
+        (m.get("content", "") for m in reversed(history) if m.get("role") == "user"),
+        "",
+    )
+    search_text = f"{last_user_turn} {question}".strip() if last_user_turn else question
+
     context_parts = []
 
     # 1a. Zeitbasierte Frage → Persönliche KUSSS-Termine einspeisen
@@ -322,19 +346,38 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
             context_parts.append(f"DEIN STUDIENERFOLG:\n{grades_text}")
 
     # 2. Dynamische Steuerung der Ähnlichkeitssuche (Chunk-Menge steuern)
+    #    Werte bewusst moderat, um unter dem Groq-TPM-Limit (6000) zu bleiben.
     if _is_list_question(question) or _is_full_curriculum_question(question):
-        match_count = 20
+        match_count = 14
     elif _is_structured_question(question):
-        match_count = 15
-    else:
         match_count = 10
+    else:
+        match_count = 8
+
+    # Bei persoenlichen Noten-/Fortschrittsfragen kommt die Antwort aus
+    # "DEIN STUDIENERFOLG"; dann reichen wenige Curriculum-Chunks als Kontext.
+    if _is_grade_question(question):
+        match_count = min(match_count, 6)
 
     # 3. Vektorsuche auf Curriculum- und Webdaten ausführen
+    #    (search_text enthaelt bei Folgefragen zusaetzlich die vorige Nutzerfrage)
     results = search_jku_knowledge(
-        question,
+        search_text,
         study_program_id=study_program_id,
         match_count=match_count,
     )
+
+    # 3b. Doppelte Chunks entfernen (die DB enthaelt teils duplizierte Eintraege,
+    #     was den Kontext unnoetig aufblaeht und das Token-Limit sprengen kann).
+    if results:
+        seen = set()
+        unique_results = []
+        for r in results:
+            content = r.get("content", "")
+            if content and content not in seen:
+                seen.add(content)
+                unique_results.append(r)
+        results = unique_results
 
     # 4. Suchergebnisse sortieren (Tabellen/Curriculum-Zeilen vor unstrukturierten Web-Daten ranken)
     if results:
@@ -345,6 +388,17 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
             ))
         chunks_text = "\n\n---\n\n".join([res["content"] for res in results])
         context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
+
+    # Name des aktuell gewaehlten Studiengangs (fuer Systemgrenzen-Hinweise im Prompt)
+    selected_program = None
+    if results:
+        selected_program = results[0].get("metadata", {}).get("study_program")
+    program_hint = (
+        f'Der Nutzer hat aktuell den Studiengang "{selected_program}" ausgewaehlt. '
+        f"Du beantwortest ausschliesslich Fragen zu diesem Studiengang."
+        if selected_program
+        else "Der Nutzer hat einen Studiengang ueber den Filter ausgewaehlt."
+    )
 
     # Kontext final zusammenbauen oder Fallback definieren
     context_text = (
@@ -357,6 +411,7 @@ def ask_assistant(question: str, user_id: str = None, study_program_id: str = No
     system_prompt = f"""Du bist ein hilfreicher Studien-Assistent fuer die JKU Linz.
 Nutze NUR den unten stehenden Kontext fuer deine Antwort.
 Heute ist der {date.today().strftime('%d.%m.%Y')}.
+{program_hint}
 
 QUELLEN IM KONTEXT:
 Der Kontext enthaelt bis zu drei Arten von Quellen:
@@ -397,9 +452,19 @@ REGELN:
    - Fasse zusammen, liste nicht mehrfach auf.
    - Wenn Curriculum "6 ECTS" sagt und Web-Daten "3 ECTS" fuer eine Teilleistung: nenne nur "6 ECTS".
 
-7. Fehlende Informationen:
-   - Wenn die Antwort nicht im Kontext steht: sage klar "Diese Information liegt mir nicht vor."
-   - Erfinde KEINE Kurse, ECTS-Werte oder Pruefungsmodalitaeten.
+7. Fehlende Informationen & Systemgrenzen:
+   - Erfinde NIEMALS Kurse, ECTS-Werte oder Pruefungsmodalitaeten.
+   - Wenn die Frage zum gewaehlten Studiengang passt, aber die Antwort nicht im Kontext steht:
+     sage freundlich, dass dir diese konkrete Information nicht vorliegt, und empfiehl,
+     im offiziellen Curriculum, im Studienhandbuch oder in KUSSS nachzusehen.
+   - Wenn sich die Frage auf einen ANDEREN Studiengang bezieht (z.B. Medizin, Jus):
+     erklaere, dass du nur Fragen zum aktuell ueber den Filter gewaehlten Studiengang
+     beantworten kannst, und schlage vor, oben den passenden Studiengang auszuwaehlen
+     (falls verfuegbar).
+   - Wenn die Frage gar nichts mit dem Studium zu tun hat (z.B. Mensa-Menue, Wetter,
+     Parkplaetze): weise freundlich darauf hin, dass du ein Studien-Assistent bist und
+     nur bei Fragen rund um Curriculum, Lehrveranstaltungen und Studienfortschritt helfen
+     kannst. Rate NICHT und erfinde keine Antwort.
 
 8. Noten- und Fortschrittsfragen:
    - Nutze AUSSCHLIESSLICH die Daten unter "DEIN STUDIENERFOLG" fuer persoenliche Fragen.
@@ -412,16 +477,31 @@ REGELN:
      Liste KEINE konkreten fehlenden Kurse auf, da du nicht sicher weisst welche das sind.
      Empfehle stattdessen, den Studienfortschritt in KUSSS zu pruefen.
 
+9. Ton & Formulierung:
+   - Antworte freundlich, klar und in vollstaendigen deutschen Saetzen.
+   - Bleibe praezise und fasse dich kurz; keine internen Hinweise wie "laut Kontext"
+     oder "im Kontext steht". Formuliere die Antwort direkt fuer die studierende Person.
+
 KONTEXT:
 {context_text}
 """
 
-    # 5. API-Inferenz über Groq ausführen
+    # 5. Nachrichten zusammenbauen: System-Prompt + bisherige Historie + aktuelle Frage.
+    #    Nur die letzten Turns mitschicken, um das Token-Budget zu schonen.
+    recent_history = [
+        {"role": m["role"], "content": m["content"]}
+        for m in history[-6:]
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
+    messages = (
+        [{"role": "system", "content": system_prompt}]
+        + recent_history
+        + [{"role": "user", "content": question}]
+    )
+
+    # 6. API-Inferenz über Groq ausführen
     chat_completion = client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ],
+        messages=messages,
         model="llama-3.1-8b-instant",
         temperature=0.2, # Niedrige Temperatur für geringe Halluzinationsanfälligkeit
     )
