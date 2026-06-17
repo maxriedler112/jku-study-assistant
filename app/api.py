@@ -35,12 +35,15 @@ async def chat(data: dict):
     user_message = data.get("message")
     study_program_id = data.get("study_program_id")
     history = data.get("history") or []
-    print(f"POST /chat received message: {user_message}, study_program_id: {study_program_id}, history_len: {len(history)}")
+    # user_id kommt vom eingeloggten Nutzer (Matrikelnummer oder UUID). Faellt auf
+    # "test-user" zurueck (ungueltig -> persoenliche Daten werden dann nicht geladen).
+    user_id = data.get("user_id") or "test-user"
+    print(f"POST /chat received message: {user_message}, study_program_id: {study_program_id}, user_id: {user_id}, history_len: {len(history)}")
 
     try:
         response = ask_assistant(
             user_message,
-            user_id="test-user",
+            user_id=user_id,
             study_program_id=study_program_id,
             history=history,
         )

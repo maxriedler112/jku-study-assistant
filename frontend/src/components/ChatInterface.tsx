@@ -160,6 +160,7 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
         body: JSON.stringify({
           message: inputText,
           study_program_id: studyProgram,
+          user_id: username,
           history,
         }),
       })

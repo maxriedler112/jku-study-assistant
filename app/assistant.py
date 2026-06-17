@@ -296,6 +296,11 @@ def _is_grade_question(question: str) -> bool:
         "meine noten", "meine prüfungen", "meine ects",
         "wie stehe ich", "wie weit bin ich",
         "sehr gut", "genügend", "befriedigend",
+        # Umgangssprachliche "Habe ich X schon gemacht?"-Formulierungen (#11)
+        "hab ich", "habe ich", "hab ich schon", "habe ich schon",
+        "schon gemacht", "schon absolviert", "schon gehabt",
+        "bereits gemacht", "bereits absolviert", "schon belegt",
+        "absolviert", "abgeschlossen",
     ]
     q_lower = question.lower()
     return any(kw in q_lower for kw in grade_keywords)
