@@ -48,7 +48,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
             {/* Logo */}
             <div className="flex justify-center mb-8">
               <div className="relative w-32 h-32 flex items-center justify-center">
-                <img src="/src/imports/image-1.png" alt="JKU Logo" className="w-full h-full object-contain opacity-90" />
+                <img src="/jku-logo.svg" alt="JKU Logo" className="w-full h-full object-contain opacity-95" />
               </div>
             </div>
 

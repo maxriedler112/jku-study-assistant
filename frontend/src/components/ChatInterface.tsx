@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { Send, Paperclip, FileText, X, Mic, LogOut, Bell, User, LayoutDashboard, Calendar, BookOpen, Coffee, Map, HelpCircle, Sparkles, Clock, MapPin, Utensils } from 'lucide-react';
-import { ScheduleView } from './ScheduleView';
-import { ExamsView } from './ExamsView';
+import { StudyProgressView } from './StudyProgressView';
 
 interface Message {
   id: number;
@@ -34,46 +33,56 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
       text: 'Willkommen beim JKU AI Assistant! Ich bin Ihr intelligenter Begleiter für alles rund um Ihr Studium. Wie kann ich Ihnen heute helfen?',
       sender: 'assistant',
       timestamp: new Date(),
-      actionCard: {
-        type: 'schedule',
-        title: 'Schnellzugriffe',
-        items: ['Prüfungstermine', 'Stundenplan']
-      }
     },
   ]);
   const [inputText, setInputText] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [activeMenu, setActiveMenu] = useState('dashboard');
-  const [showSchedule, setShowSchedule] = useState(false);
-  const [showExams, setShowExams] = useState(false);
-  const [scheduleFile, setScheduleFile] = useState<File | null>(null);
-  const [scheduleIcsText, setScheduleIcsText] = useState<string | null>(null);
-  const [examsFile, setExamsFile] = useState<File | null>(null);
-  const [examsIcsText, setExamsIcsText] = useState<string | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   // Studiengaenge werden dynamisch vom Backend geladen (nur solche mit Inhalten in Supabase)
   const [programs, setPrograms] = useState<StudyProgram[]>([]);
   const [studyProgram, setStudyProgram] = useState<string>('');
 
-  // KI-Schnittstelle: Arrays für Events, die vom AI Assistant befüllt werden können
-  const [scheduleEvents, setScheduleEvents] = useState<Array<{
-    id: string;
-    title: string;
-    date: string;
-    time: string;
-    location?: string;
-  }>>([]);
+  // Studienerfolgs-Daten
+  const [studyProgress, setStudyProgress] = useState<{
+    ects_total: number;
+    passed: number;
+    failed: number;
+    total: number;
+    grade_average?: number;
+  } | null>(null);
+  const [studyProgressLoading, setStudyProgressLoading] = useState(false);
 
-  const [examEvents, setExamEvents] = useState<Array<{
-    id: string;
-    title: string;
-    date: string;
-    time: string;
-    location?: string;
-    daysUntil?: number;
-  }>>([]);
 
+  const loadStudyProgress = async () => {
+    try {
+      setStudyProgressLoading(true);
+      const userId = username || localStorage.getItem('userId') || 'test-user';
+      const response = await fetch('http://127.0.0.1:8001/study-progress', {
+        headers: {
+          'User-ID': userId
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      setStudyProgress({
+        ects_total: data.ects_total || 0,
+        passed: data.passed || 0,
+        failed: data.failed || 0,
+        total: data.total || 0,
+        grade_average: data.grade_average || 0
+      });
+    } catch (err) {
+      console.error('Studienerfolgs-Daten konnten nicht geladen werden:', err);
+    } finally {
+      setStudyProgressLoading(false);
+    }
+  };
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -87,7 +96,7 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
 
   // Studiengaenge einmalig beim Laden vom Backend holen und den ersten vorauswaehlen
   useEffect(() => {
-    fetch('http://127.0.0.1:8000/programs')
+    fetch('http://127.0.0.1:8001/programs')
       .then((res) => res.json())
       .then((data) => {
         const list: StudyProgram[] = data.programs || [];
@@ -101,29 +110,10 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
       });
   }, []);
 
-  const handleScheduleIcsUpload = (file: File) => {
-    setScheduleFile(file);
-    file.text()
-      .then((text) => {
-        setScheduleIcsText(text);
-        setAttachmentError(null);
-      })
-      .catch(() => {
-        setAttachmentError('Die iCal-Datei konnte nicht gelesen werden.');
-      });
-  };
-
-  const handleExamsIcsUpload = (file: File) => {
-    setExamsFile(file);
-    file.text()
-      .then((text) => {
-        setExamsIcsText(text);
-        setAttachmentError(null);
-      })
-      .catch(() => {
-        setAttachmentError('Die iCal-Datei konnte nicht gelesen werden.');
-      });
-  };
+  // Studienerfolgs-Daten vom Backend laden
+  useEffect(() => {
+    loadStudyProgress();
+  }, [username]);
 
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
@@ -152,15 +142,16 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
           content: m.text,
         }));
 
-      fetch('http://127.0.0.1:8000/chat', {
+      fetch('http://127.0.0.1:8001/chat', {
         method: 'POST',
+        mode: 'cors',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           message: inputText,
           study_program_id: studyProgram,
-          user_id: username,
+          user_id: userId,
           history,
         }),
       })
@@ -186,16 +177,86 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    const pdfFiles = files.filter(file => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'));
-    const invalidFiles = files.filter(file => !(file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')));
+    const validFiles = files.filter(file => 
+      file.type === 'application/pdf' || 
+      file.type === 'text/csv' ||
+      file.name.toLowerCase().endsWith('.pdf') ||
+      file.name.toLowerCase().endsWith('.csv')
+    );
+    const invalidFiles = files.filter(file => 
+      !(file.type === 'application/pdf' || 
+        file.type === 'text/csv' ||
+        file.name.toLowerCase().endsWith('.pdf') ||
+        file.name.toLowerCase().endsWith('.csv'))
+    );
 
-    if (pdfFiles.length > 0) {
-      setAttachedFiles([...attachedFiles, ...pdfFiles]);
+    if (validFiles.length > 0) {
+      setAttachedFiles([...attachedFiles, ...validFiles]);
       setAttachmentError(null);
+
+      // Lade alle validen PDF-/CSV-Dateien als Studienerfolg hoch.
+      validFiles.forEach((file) => {
+        void uploadStudyProgress(file);
+      });
     }
 
     if (invalidFiles.length > 0) {
-      setAttachmentError('Nur PDF-Dateien können hier angehängt werden.');
+      setAttachmentError('Nur PDF- und CSV-Dateien können hier angehängt werden.');
+    }
+  };
+
+  const uploadStudyProgress = async (file: File) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const userId = username || localStorage.getItem('userId') || 'test-user';
+
+      const response = await fetch('http://127.0.0.1:8001/study-progress', {
+        method: 'POST',
+        mode: 'cors',
+        headers: {
+          'User-ID': userId,
+        },
+        body: formData
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        const detail = typeof data?.detail === 'string' ? data.detail : `HTTP ${response.status}`;
+        throw new Error(detail);
+      }
+      
+      if (data.success) {
+        // Nach erfolgreichem Upload frisch aus der DB laden (inkl. Notendurchschnitt)
+        await loadStudyProgress();
+
+        const successMessage: Message = {
+          id: messages.length + 1,
+          text: `✅ Studienerfolg hochgeladen: ${data.data.passed} Kurse gespeichert, ${data.data.ects_total} ECTS erreicht`,
+          sender: 'assistant',
+          timestamp: new Date(),
+        };
+        setMessages([...messages, successMessage]);
+      } else {
+        const errorMessage: Message = {
+          id: messages.length + 1,
+          text: `❌ Fehler: ${data.message}`,
+          sender: 'assistant',
+          timestamp: new Date(),
+        };
+        setMessages([...messages, errorMessage]);
+      }
+    } catch (err) {
+      console.error('Upload error:', err);
+      const errMessage = err instanceof Error ? err.message : 'Unbekannter Fehler';
+      const errorMessage: Message = {
+        id: messages.length + 1,
+        text: `❌ Fehler beim Hochladen der Datei: ${errMessage}`,
+        sender: 'assistant',
+        timestamp: new Date(),
+      };
+      setMessages([...messages, errorMessage]);
     }
   };
 
@@ -205,47 +266,14 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
 
   const menuItems = [
     { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-    { id: 'schedule', icon: Calendar, label: 'Stundenplan' },
-    { id: 'exams', icon: Clock, label: 'Prüfungen' },
   ];
 
   const handleMenuClick = (menuId: string) => {
     setActiveMenu(menuId);
-    if (menuId === 'schedule') {
-      setShowSchedule(true);
-    } else if (menuId === 'exams') {
-      setShowExams(true);
-    }
-  };
-
-  const handleQuickAction = (action: string) => {
-    if (action === 'Stundenplan') {
-      setShowSchedule(true);
-    } else if (action === 'Prüfungstermine') {
-      setShowExams(true);
-    }
   };
 
   return (
     <>
-      {showSchedule && (
-        <ScheduleView
-          scheduleFile={scheduleFile}
-          scheduleEvents={scheduleEvents}
-          onFileUpload={handleScheduleIcsUpload}
-          onClose={() => setShowSchedule(false)}
-        />
-      )}
-
-      {showExams && (
-        <ExamsView
-          examsFile={examsFile}
-          examEvents={examEvents}
-          onFileUpload={handleExamsIcsUpload}
-          onClose={() => setShowExams(false)}
-        />
-      )}
-
 <div className="w-full h-screen flex bg-gradient-to-br from-[#0a0a0a] via-[#1a1a1a] to-[#0f1f15] relative overflow-hidden">      {/* Animated Background Elements */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-20 right-20 w-96 h-96 bg-white/10 rounded-full blur-3xl animate-pulse"></div>
@@ -272,7 +300,7 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
           <div className="p-5 border-b border-white/10">
             <div className="flex items-center gap-3 mb-6">
               <div className="w-14 h-14 flex items-center justify-center">
-                <img src="/src/imports/image-1.png" alt="JKU Logo" className="w-full h-full object-contain opacity-90" />
+                <img src="/jku-logo.svg" alt="JKU Logo" className="w-full h-full object-contain opacity-95" />
               </div>
               <div>
                 <h2 className="text-white font-semibold">JKU AI</h2>
@@ -301,6 +329,11 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
                 </button>
               );
             })}
+          </div>
+
+          {/* Study Progress Section */}
+          <div className="px-3 py-3 border-t border-white/10">
+            <StudyProgressView data={studyProgress} isLoading={studyProgressLoading} onUpload={uploadStudyProgress} />
           </div>
 
           {/* User Section */}
@@ -385,7 +418,6 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
                         {message.actionCard.items?.map((item, idx) => (
                           <button
                             key={idx}
-                            onClick={() => handleQuickAction(item)}
                             className="flex items-center justify-center gap-2 px-4 py-3 bg-white/5 hover:bg-white/20 border border-white/10 hover:border-white/50 rounded-xl transition-all text-sm text-gray-300 hover:text-white group"
                           >
                             {item === 'Prüfungstermine' && <Clock className="w-4 h-4" />}
@@ -462,15 +494,12 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
                   </button>
                 ))}
               </div>
-              <p className="text-xs text-gray-400 mb-3">
-                Der AI Assistant verwendet nur Inhalte aus dem gewählten Studiengang. iCal-Dateien für Stundenplan und Prüfungen werden zusätzlich verarbeitet.
-              </p>
               <div className="relative flex items-center gap-3 bg-white/5 backdrop-blur-xl border-2 border-white/10 focus-within:border-white rounded-2xl px-2 py-2 transition-all shadow-lg shadow-black/20">
                 <input
                   type="file"
                   ref={fileInputRef}
                   onChange={handleFileSelect}
-                  accept=".pdf"
+                  accept=".pdf,.csv"
                   multiple
                   className="hidden"
                 />

@@ -679,6 +679,8 @@ def process_studienerfolg(file_bytes: bytes, filename: str, user_id: str) -> dic
     passed_grades = [g for g in grades if g["passed"]]
     failed_grades = [g for g in grades if not g["passed"]]
     ects_total = sum(g["ects"] for g in passed_grades)
+    numeric_grades = [g["grade"] for g in passed_grades if isinstance(g.get("grade"), (int, float)) and g["grade"] > 0]
+    grade_average = (sum(numeric_grades) / len(numeric_grades)) if numeric_grades else 0
 
     return {
         "total":      len(grades),
@@ -686,4 +688,5 @@ def process_studienerfolg(file_bytes: bytes, filename: str, user_id: str) -> dic
         "passed":     len(passed_grades),
         "failed":     len(failed_grades),
         "ects_total": round(ects_total, 1),
+        "grade_average": round(grade_average, 1),
     }

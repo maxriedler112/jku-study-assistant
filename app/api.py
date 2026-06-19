@@ -1,16 +1,18 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from assistant import ask_assistant
 from search import supabase
+from pipeline import process_studienerfolg
+from typing import Optional
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["User-ID", "Content-Type"],
 )
 
 @app.get("/")
@@ -29,6 +31,131 @@ def programs():
     except Exception as exc:
         print(f"GET /programs error: {exc}")
         return {"programs": []}
+
+
+def get_study_progress_summary(user_id: str):
+    resp = supabase.table("completed_courses").select("*").eq("user_id", user_id).execute()
+    courses = resp.data or []
+    passed = sum(1 for c in courses if c.get("passed", False))
+    failed = len(courses) - passed
+    ects_total = sum(c.get("ects", 0) for c in courses if c.get("passed", False))
+    grades = [
+        c.get("grade")
+        for c in courses
+        if c.get("passed", False) and isinstance(c.get("grade"), (int, float)) and c.get("grade") > 0
+    ]
+    grade_average = round(sum(grades) / len(grades), 1) if grades else 0
+
+    return {
+        "ects_total": round(ects_total, 1),
+        "passed": passed,
+        "failed": failed,
+        "total": len(courses),
+        "grade_average": grade_average,
+    }
+
+
+@app.post("/study-progress")
+def study_progress_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    user_id: Optional[str] = Header(None)
+):
+    print(f"POST /study-progress request: method={request.method}, content-type={request.headers.get('content-type')}, user_id={user_id}")
+    if not user_id:
+        user_id = request.headers.get('user-id') or request.headers.get('User-ID')
+    if not user_id:
+        user_id = request.query_params.get('user_id')
+    """
+    Upload-Endpunkt für Studienerfolg-PDF/CSV.
+    Verarbeitet die Datei und speichert die Noten in Supabase.
+    """
+    if not user_id or user_id == "test-user":
+        return {
+            "success": False,
+            "message": "User-ID erforderlich"
+        }
+    
+    try:
+        file_bytes = file.file.read()
+        result = process_studienerfolg(file_bytes, file.filename or "file", user_id)
+        summary = get_study_progress_summary(user_id)
+        
+        return {
+            "success": True,
+            "message": f"{result['passed']} Kurse gespeichert",
+            "data": summary
+        }
+    except ValueError as e:
+        return {
+            "success": False,
+            "message": str(e)
+        }
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return {
+            "success": False,
+            "message": "Fehler beim Verarbeiten der Datei"
+        }
+
+@app.get("/study-progress")
+def study_progress(user_id: Optional[str] = Header(None)):
+    """
+    Liefert die Studienerfolgs-Daten für einen User (ECTS, Noten, Erfolgsquote, etc.)
+    """
+    if not user_id or user_id == "test-user":
+        # Keine Daten für Test-User
+        return {
+            "ects_total": 0,
+            "passed": 0,
+            "failed": 0,
+            "total": 0,
+            "grade_average": 0
+        }
+    
+    try:
+        # Hole alle completed_courses für diesen User
+        resp = supabase.table("completed_courses").select("*").eq("user_id", user_id).execute()
+        courses = resp.data or []
+        
+        if not courses:
+            return {
+                "ects_total": 0,
+                "passed": 0,
+                "failed": 0,
+                "total": 0,
+                "grade_average": 0
+            }
+        
+        # Berechne Statistiken
+        passed = sum(1 for c in courses if c.get("passed", False))
+        failed = len(courses) - passed
+        ects_total = sum(c.get("ects", 0) for c in courses if c.get("passed", False))
+        
+        # Berechne Notendurchschnitt (nur bestandene Kurse)
+        grades = [
+            c.get("grade")
+            for c in courses
+            if c.get("passed", False) and isinstance(c.get("grade"), (int, float)) and c.get("grade") > 0
+        ]
+        grade_average = sum(grades) / len(grades) if grades else 0
+        
+        return {
+            "ects_total": round(ects_total, 1),
+            "passed": passed,
+            "failed": failed,
+            "total": len(courses),
+            "grade_average": round(grade_average, 1)
+        }
+    except Exception as exc:
+        print(f"GET /study-progress error: {exc}")
+        return {
+            "ects_total": 0,
+            "passed": 0,
+            "failed": 0,
+            "total": 0,
+            "grade_average": 0
+        }
 
 @app.post("/chat")
 async def chat(data: dict):
