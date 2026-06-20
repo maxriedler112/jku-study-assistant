@@ -4,6 +4,7 @@ from assistant import ask_assistant
 from search import supabase
 from pipeline import process_studienerfolg
 from typing import Optional
+from ical_ingest import ingest_ics_text
 
 app = FastAPI()
 
@@ -156,6 +157,43 @@ def study_progress(user_id: Optional[str] = Header(None)):
             "total": 0,
             "grade_average": 0
         }
+
+
+@app.post("/upload-ics")
+async def upload_ics(data: dict):
+    """
+    Nimmt einen iCal-Text (.ics) entgegen, parst die Termine und speichert sie
+    in Supabase 'events' unter der user_id des eingeloggten Nutzers.
+    """
+    ics_text = data.get("ics_text")
+    user_id = data.get("user_id") or "test-user"
+    if not ics_text:
+        return {"saved": 0, "error": "Kein iCal-Inhalt erhalten."}
+    try:
+        saved = ingest_ics_text(ics_text, user_id)
+        print(f"POST /upload-ics: {saved} Events fuer user_id={user_id} gespeichert")
+        return {"saved": saved}
+    except Exception as exc:
+        print(f"POST /upload-ics error: {exc}")
+        return {"saved": 0, "error": "iCal-Datei konnte nicht verarbeitet werden."}
+
+
+@app.get("/events")
+def events(user_id: str):
+    """Liefert die gespeicherten Termine eines Nutzers fuer die Stundenplan-Anzeige."""
+    try:
+        resp = (
+            supabase.table("events")
+            .select("id,course_name,course_type,start_dt,end_dt,location")
+            .eq("user_id", user_id)
+            .order("start_dt")
+            .execute()
+        )
+        return {"events": resp.data or []}
+    except Exception as exc:
+        print(f"GET /events error: {exc}")
+        return {"events": []}
+
 
 @app.post("/chat")
 async def chat(data: dict):

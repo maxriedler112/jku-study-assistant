@@ -133,6 +133,8 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
 
       console.log('Chat send:', { inputText, attachedFiles });
 
+      const userId = username || localStorage.getItem('userId') || 'test-user';
+
       // Bisherigen Verlauf als Historie mitschicken, damit Folgefragen
       // (z.B. "in welchem Semester wird es empfohlen?") aufgeloest werden koennen.
       const history = messages

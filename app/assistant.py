@@ -105,16 +105,22 @@ def query_events(question: str, user_id: str) -> str:
         return ""
     start, end = get_date_range(question)
 
-    # Abfrage der Events innerhalb der Datumsgrenzen (inkl. Puffer für den Endtag)
-    response = (
-        supabase.table("events")
-        .select("course_name,course_type,event_type,description,start_dt,end_dt,location")
-        .eq("user_id", user_id)
-        .gte("start_dt", start.isoformat())
-        .lte("start_dt", (end + timedelta(days=1)).isoformat())
-        .order("start_dt")
-        .execute()
-    )
+    # Abfrage der Events innerhalb der Datumsgrenzen (inkl. Puffer für den Endtag).
+    # events.user_id ist vom Typ uuid; bei Matrikelnummern (oder anderen Mismatches)
+    # wirft Postgres einen Fehler -> defensiv abfangen statt die Anfrage zu killen.
+    try:
+        response = (
+            supabase.table("events")
+            .select("course_name,course_type,event_type,description,start_dt,end_dt,location")
+            .eq("user_id", user_id)
+            .gte("start_dt", start.isoformat())
+            .lte("start_dt", (end + timedelta(days=1)).isoformat())
+            .order("start_dt")
+            .execute()
+        )
+    except Exception as exc:
+        print(f"query_events: uebersprungen ({exc})")
+        return ""
 
     if not response.data:
         return ""
@@ -273,7 +279,9 @@ def _is_structured_question(question: str) -> bool:
         "studienfachkennung",
         "gehört zu", "teil von", "zugeordnet",
         "gliedert sich",
-        "wie viele ects", "wieviele ects", "ects hat",
+        "wie viele ects", "wieviele ects", "wieviel ects", "wie viel ects",
+        "ects hat", "ects bekomme", "ects bekommt", "ects gibt",
+        "ects für", "ects fuer", "ects bringt", "ects sind",
         "welche fächer gehören", "welche module gehören",
         "zu welchem fach",
     ]
@@ -304,6 +312,21 @@ def _is_grade_question(question: str) -> bool:
     ]
     q_lower = question.lower()
     return any(kw in q_lower for kw in grade_keywords)
+
+
+def _is_duration_question(question: str) -> bool:
+    """
+    Erkennt Fragen zur Studiendauer (§ 5 Dauer und Gliederung). Diese Info steckt
+    in einem kurzen Prosa-Chunk, der von vielen 'Semesterstunden'-LVA-Chunks
+    verdraengt wird – daher gesondert behandeln.
+    """
+    q = question.lower()
+    duration_keywords = [
+        "wie viele semester", "wie lange dauert", "wie lange geht",
+        "dauer des studiums", "studiendauer", "regelstudienzeit",
+        "wie viele semester dauert", "wieviele semester",
+    ]
+    return any(kw in q for kw in duration_keywords)
 
 
 def ask_assistant(
@@ -347,7 +370,12 @@ def ask_assistant(
 
     # 2. Dynamische Steuerung der Ähnlichkeitssuche (Chunk-Menge steuern)
     #    Werte bewusst moderat, um unter dem Groq-TPM-Limit (6000) zu bleiben.
-    if _is_list_question(question) or _is_full_curriculum_question(question):
+    duration_question = _is_duration_question(question)
+    if duration_question:
+        # Der § 5-Prosa-Chunk wird leicht von 'Semesterstunden'-LVAs verdraengt;
+        # mehr Treffer holen und unten gezielt nach vorne sortieren.
+        match_count = 18
+    elif _is_list_question(question) or _is_full_curriculum_question(question):
         match_count = 14
     elif _is_structured_question(question):
         match_count = 10
@@ -381,7 +409,14 @@ def ask_assistant(
 
     # 4. Suchergebnisse sortieren (Tabellen/Curriculum-Zeilen vor unstrukturierten Web-Daten ranken)
     if results:
-        if _is_list_question(question) or _is_structured_question(question):
+        if duration_question:
+            # Chunks, die die Studiendauer tatsaechlich nennen, nach ganz vorne.
+            results.sort(key=lambda r: (
+                0 if ("dauert" in r.get("content", "").lower()
+                      or "dauer und gliederung" in r.get("content", "").lower())
+                else 1
+            ))
+        elif _is_list_question(question) or _is_structured_question(question):
             results.sort(key=lambda r: (
                 0 if r.get("metadata", {}).get("chunk_type") in ("curriculum_row", "overview_table")
                 else 1
@@ -395,7 +430,9 @@ def ask_assistant(
         selected_program = results[0].get("metadata", {}).get("study_program")
     program_hint = (
         f'Der Nutzer hat aktuell den Studiengang "{selected_program}" ausgewaehlt. '
-        f"Du beantwortest ausschliesslich Fragen zu diesem Studiengang."
+        f"Curriculum-Fragen beziehen sich auf diesen Studiengang. "
+        f"Persoenliche Daten (KALENDER-EINTRAEGE und DEIN STUDIENERFOLG) gelten "
+        f"unabhaengig vom gewaehlten Studiengang und werden IMMER verwendet, wenn vorhanden."
         if selected_program
         else "Der Nutzer hat einen Studiengang ueber den Filter ausgewaehlt."
     )
@@ -428,6 +465,12 @@ REGELN:
    - Ignoriere ECTS-Werte einzelner Uebungen oder Vorlesungen aus Web-Daten.
    - Wenn Curriculum und Web-Daten unterschiedliche ECTS zeigen, verwende NUR den Curriculum-Wert.
    - Nenne jeden Wert nur einmal, auch wenn mehrere Quellen ihn bestaetigen.
+   - WICHTIG bei mehrdeutigen Namen: Wird nach einem Fach X gefragt, nimm den
+     Curriculum-Eintrag, dessen "Bezeichnung" GENAU X ist (z.B. "Software Engineering").
+     Ignoriere laengere Eintraege, die X nur enthalten (z.B. "Methoden und Konzepte
+     des Software Engineering" oder "Anwendungen des Software Engineering") sowie
+     einzelne Lehrveranstaltungen (VL/UE/PR/PS) – diese sind Teil-Leistungen des Fachs.
+     Beispiel: "Software Engineering" -> 12 ECTS (das Pflichtfach), nicht 3 oder 6.
 
 2. Code-Fragen (Studienfachkennung):
    - Suche im Kontext nach Eintraegen mit "Code: XXX" im Curriculum-Format.
@@ -477,7 +520,14 @@ REGELN:
      Liste KEINE konkreten fehlenden Kurse auf, da du nicht sicher weisst welche das sind.
      Empfehle stattdessen, den Studienfortschritt in KUSSS zu pruefen.
 
-9. Ton & Formulierung:
+9. Kalender / Stundenplan / Termine:
+   - Wenn "KALENDER-EINTRAEGE" im Kontext stehen, beantworte Fragen nach Stundenplan,
+     Terminen, Pruefungen oder "diese/naechste Woche" DIREKT anhand dieser Eintraege
+     (mit Datum, Uhrzeit und Raum).
+   - Behaupte NIEMALS, du haettest keinen Zugriff auf persoenliche Termine/Stundenplaene,
+     wenn KALENDER-EINTRAEGE vorhanden sind. Diese gelten unabhaengig vom gewaehlten Studiengang.
+
+10. Ton & Formulierung:
    - Antworte freundlich, klar und in vollstaendigen deutschen Saetzen.
    - Bleibe praezise und fasse dich kurz; keine internen Hinweise wie "laut Kontext"
      oder "im Kontext steht". Formuliere die Antwort direkt fuer die studierende Person.
