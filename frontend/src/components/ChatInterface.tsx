@@ -101,15 +101,43 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
       });
   }, []);
 
+  // Gespeicherte Termine vom Backend laden und fuer die Stundenplan-Anzeige aufbereiten.
+  const loadScheduleEvents = () => {
+    fetch(`http://127.0.0.1:8000/events?user_id=${encodeURIComponent(username)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        const evs = (data.events || []).map((e: any) => {
+          const dt = new Date(e.start_dt);
+          return {
+            id: e.id,
+            title: `${e.course_type ? e.course_type + ' ' : ''}${e.course_name}`,
+            date: dt.toLocaleDateString('de-AT'),
+            time: dt.toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit' }),
+            location: e.location || undefined,
+          };
+        });
+        setScheduleEvents(evs);
+      })
+      .catch((err) => console.error('Termine konnten nicht geladen werden:', err));
+  };
+
   const handleScheduleIcsUpload = (file: File) => {
     setScheduleFile(file);
     file.text()
       .then((text) => {
         setScheduleIcsText(text);
         setAttachmentError(null);
+        // iCal ans Backend schicken (parsen + in Supabase speichern), dann Termine laden.
+        return fetch('http://127.0.0.1:8000/upload-ics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ics_text: text, user_id: username }),
+        });
       })
+      .then((res) => res.json())
+      .then(() => loadScheduleEvents())
       .catch(() => {
-        setAttachmentError('Die iCal-Datei konnte nicht gelesen werden.');
+        setAttachmentError('Die iCal-Datei konnte nicht verarbeitet werden.');
       });
   };
 

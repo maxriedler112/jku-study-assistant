@@ -430,7 +430,9 @@ def ask_assistant(
         selected_program = results[0].get("metadata", {}).get("study_program")
     program_hint = (
         f'Der Nutzer hat aktuell den Studiengang "{selected_program}" ausgewaehlt. '
-        f"Du beantwortest ausschliesslich Fragen zu diesem Studiengang."
+        f"Curriculum-Fragen beziehen sich auf diesen Studiengang. "
+        f"Persoenliche Daten (KALENDER-EINTRAEGE und DEIN STUDIENERFOLG) gelten "
+        f"unabhaengig vom gewaehlten Studiengang und werden IMMER verwendet, wenn vorhanden."
         if selected_program
         else "Der Nutzer hat einen Studiengang ueber den Filter ausgewaehlt."
     )
@@ -518,7 +520,14 @@ REGELN:
      Liste KEINE konkreten fehlenden Kurse auf, da du nicht sicher weisst welche das sind.
      Empfehle stattdessen, den Studienfortschritt in KUSSS zu pruefen.
 
-9. Ton & Formulierung:
+9. Kalender / Stundenplan / Termine:
+   - Wenn "KALENDER-EINTRAEGE" im Kontext stehen, beantworte Fragen nach Stundenplan,
+     Terminen, Pruefungen oder "diese/naechste Woche" DIREKT anhand dieser Eintraege
+     (mit Datum, Uhrzeit und Raum).
+   - Behaupte NIEMALS, du haettest keinen Zugriff auf persoenliche Termine/Stundenplaene,
+     wenn KALENDER-EINTRAEGE vorhanden sind. Diese gelten unabhaengig vom gewaehlten Studiengang.
+
+10. Ton & Formulierung:
    - Antworte freundlich, klar und in vollstaendigen deutschen Saetzen.
    - Bleibe praezise und fasse dich kurz; keine internen Hinweise wie "laut Kontext"
      oder "im Kontext steht". Formuliere die Antwort direkt fuer die studierende Person.
