@@ -1,176 +1,108 @@
-import { Calendar, Upload, X, Clock, ChevronLeft, ChevronRight } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useRef, type ChangeEvent } from 'react';
+import { CalendarClock, Upload, MapPin, AlertCircle } from 'lucide-react';
 
-interface ScheduleEvent {
+export interface ScheduleEvent {
   id: string;
   title: string;
   date: string;
   time: string;
   location?: string;
+  start: string; // ISO, fuer Sortierung/Filterung
 }
 
 interface ScheduleViewProps {
-  scheduleFile: File | null;
-  scheduleEvents: ScheduleEvent[];
-  onFileUpload: (file: File) => void;
-  onClose: () => void;
+  events: ScheduleEvent[];
+  isLoading: boolean;
+  onUpload: (file: File) => Promise<void>;
 }
 
-export function ScheduleView({ scheduleFile, scheduleEvents, onFileUpload, onClose }: ScheduleViewProps) {
+export function ScheduleView({ events, isLoading, onUpload }: ScheduleViewProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [currentWeekOffset, setCurrentWeekOffset] = useState(0);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && (file.name.endsWith('.ics') || file.name.endsWith('.ical'))) {
-      onFileUpload(file);
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      await onUpload(file);
+      event.target.value = '';
     }
   };
 
-  const getWeekLabel = () => {
-    if (currentWeekOffset === 0) return 'Diese Woche';
-    if (currentWeekOffset === 1) return 'Nächste Woche';
-    if (currentWeekOffset === -1) return 'Letzte Woche';
-    return `Woche ${currentWeekOffset > 0 ? '+' : ''}${currentWeekOffset}`;
-  };
+  // Nur kommende Termine, die naechsten 5.
+  const now = Date.now();
+  const upcoming = events
+    .filter((e) => new Date(e.start).getTime() >= now)
+    .slice(0, 5);
 
-  const getCurrentWeekEvents = () => {
-    // KI-Schnittstelle: Hier können Events für die aktuelle Woche gefiltert werden
-    return scheduleEvents;
-  };
+  const renderUploadButton = () => (
+    <div className="pt-3 border-t border-white/10">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".ics,.ical"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+      <button
+        type="button"
+        onClick={handleUploadClick}
+        className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 bg-white/10 hover:bg-white/15 border border-white/10 rounded-xl text-sm font-medium text-white transition"
+      >
+        <Upload className="w-4 h-4 text-indigo-300" />
+        Stundenplan (iCal) hochladen
+      </button>
+      <p className="text-[11px] text-gray-400 mt-2">KUSSS-iCal-Datei (.ics) mit deinen Terminen hochladen.</p>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <div className="p-4 bg-white/5 border border-white/10 rounded-xl">
+        <p className="text-xs text-gray-400">Laden...</p>
+      </div>
+    );
+  }
+
+  if (events.length === 0) {
+    return (
+      <div className="p-4 bg-white/5 border border-white/10 rounded-xl space-y-4">
+        <div className="flex items-center gap-2 text-xs text-gray-400">
+          <AlertCircle className="w-4 h-4" />
+          <span>Kein Stundenplan vorhanden</span>
+        </div>
+        {renderUploadButton()}
+      </div>
+    );
+  }
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col p-8 relative">
-        <button
-          onClick={onClose}
-          className="absolute top-6 right-6 p-2 hover:bg-white/10 rounded-xl transition"
-        >
-          <X className="w-5 h-5 text-gray-300" />
-        </button>
-
-        <div className="flex items-center gap-3 mb-6">
-          <div className="p-3 bg-white/10 rounded-xl">
-            <Calendar className="w-6 h-6 text-white" />
-          </div>
-          <h2 className="text-2xl font-semibold text-white">Stundenplan</h2>
-        </div>
-
-        {!scheduleFile ? (
-          <div className="text-center py-12">
-            <div className="mb-6 flex justify-center">
-              <div className="p-6 bg-white/5 rounded-2xl">
-                <Upload className="w-12 h-12 text-gray-400" />
-              </div>
-            </div>
-            <h3 className="text-xl font-semibold text-white mb-3">
-              Kein Stundenplan vorhanden
-            </h3>
-            <p className="text-gray-400 mb-6 max-w-md mx-auto">
-              Laden Sie Ihre iCal-Datei (.ics) hoch, damit der JKU AI Assistant Ihren Stundenplan analysieren kann.
-            </p>
-
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileSelect}
-              accept=".ics,.ical"
-              className="hidden"
-            />
-
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="px-6 py-3 bg-gradient-to-br from-white to-gray-200 text-black rounded-xl hover:shadow-lg hover:shadow-white/50 transition-all font-medium inline-flex items-center gap-2"
-            >
-              <Upload className="w-5 h-5" />
-              iCal-Datei hochladen
-            </button>
-          </div>
-        ) : (
-          <div className="flex-1 overflow-hidden flex flex-col">
-            <div className="bg-white/5 border border-white/10 rounded-2xl p-6 mb-6">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-white/10 rounded-lg">
-                    <Calendar className="w-5 h-5 text-white" />
-                  </div>
-                  <div>
-                    <p className="text-white font-medium">{scheduleFile.name}</p>
-                    <p className="text-sm text-gray-400">
-                      {(scheduleFile.size / 1024).toFixed(2)} KB
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="text-sm text-gray-400 hover:text-white transition"
-                >
-                  Ändern
-                </button>
-              </div>
-            </div>
-
-            {/* Week Navigation */}
-            <div className="flex items-center justify-between mb-4">
-              <button
-                onClick={() => setCurrentWeekOffset(currentWeekOffset - 1)}
-                className="p-2 hover:bg-white/10 rounded-xl transition"
-              >
-                <ChevronLeft className="w-5 h-5 text-white" />
-              </button>
-              <h3 className="text-lg font-semibold text-white">{getWeekLabel()}</h3>
-              <button
-                onClick={() => setCurrentWeekOffset(currentWeekOffset + 1)}
-                className="p-2 hover:bg-white/10 rounded-xl transition"
-              >
-                <ChevronRight className="w-5 h-5 text-white" />
-              </button>
-            </div>
-
-            {/* Events List - KI Schnittstelle */}
-            <div className="flex-1 overflow-y-auto space-y-3">
-              {getCurrentWeekEvents().length > 0 ? (
-                getCurrentWeekEvents().map((event) => (
-                  <div
-                    key={event.id}
-                    className="bg-white/5 border border-white/10 rounded-xl p-4 hover:bg-white/10 transition"
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="p-2 bg-white/10 rounded-lg">
-                        <Clock className="w-4 h-4 text-white" />
-                      </div>
-                      <div className="flex-1">
-                        <p className="text-white font-medium mb-1">{event.title}</p>
-                        <p className="text-sm text-gray-400">{event.date}, {event.time}</p>
-                        {event.location && (
-                          <p className="text-sm text-gray-500">{event.location}</p>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-gray-400">
-                    Keine Termine für diese Woche gefunden.
-                  </p>
-                  <p className="text-sm text-gray-500 mt-2">
-                    Der AI Assistant wird die iCal-Datei verarbeiten.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileSelect}
-              accept=".ics,.ical"
-              className="hidden"
-            />
-          </div>
-        )}
+    <div className="p-4 bg-gradient-to-br from-indigo-500/20 to-blue-500/10 border border-indigo-400/30 rounded-xl space-y-4">
+      <div className="flex items-center gap-2">
+        <CalendarClock className="w-5 h-5 text-indigo-400" />
+        <h3 className="text-sm font-semibold text-white">Naechste Termine</h3>
       </div>
+
+      <div className="space-y-2">
+        {upcoming.length === 0 && (
+          <p className="text-xs text-gray-400">Keine kommenden Termine.</p>
+        )}
+        {upcoming.map((e) => (
+          <div key={e.id} className="bg-white/5 rounded-lg p-2.5 border border-white/10">
+            <p className="text-sm font-medium text-white truncate">{e.title}</p>
+            <p className="text-xs text-indigo-200">{e.date}, {e.time}</p>
+            {e.location && (
+              <p className="text-[11px] text-gray-400 flex items-center gap-1">
+                <MapPin className="w-3 h-3" /> {e.location}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {renderUploadButton()}
     </div>
   );
 }
