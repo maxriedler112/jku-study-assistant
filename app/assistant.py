@@ -1,6 +1,7 @@
 import os
 import re
 from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from groq import Groq
 from supabase import create_client, Client
@@ -125,11 +126,17 @@ def query_events(question: str, user_id: str) -> str:
     if not response.data:
         return ""
 
-    # String-Formatierung der Events für den LLM-Kontext
+    # String-Formatierung der Events für den LLM-Kontext.
+    # start_dt kommt als UTC -> nach Europe/Vienna umrechnen (sonst 1-2h Versatz).
     lines = []
     for ev in response.data:
-        dt = datetime.fromisoformat(ev["start_dt"]).strftime("%d.%m.%Y %H:%M")
-        line = f"- {dt}: {ev.get('course_type', '')} {ev['course_name']}"
+        dt = (
+            datetime.fromisoformat(ev["start_dt"])
+            .astimezone(ZoneInfo("Europe/Vienna"))
+            .strftime("%d.%m.%Y %H:%M")
+        )
+        course_type = ev.get("course_type") or ""
+        line = f"- {dt}: {course_type} {ev['course_name']}".replace("  ", " ")
         if ev.get("event_type"):
             line += f" [{ev['event_type']}]"
         if ev.get("location"):
@@ -304,6 +311,11 @@ def _is_grade_question(question: str) -> bool:
         "meine noten", "meine prüfungen", "meine ects",
         "wie stehe ich", "wie weit bin ich",
         "sehr gut", "genügend", "befriedigend",
+        # ECTS-/Abschluss-Fortschritt ("wie viele ECTS fehlen mir noch?")
+        "fehlen mir", "fehlen noch", "ects fehlen", "ects brauche",
+        "noch brauche", "noch benötige", "abschließen", "abzuschließen",
+        "studium abschließen", "wie viele ects fehlen", "wie viel fehlt",
+        "wie viele ects habe", "wie viele ects bin", "erreichte ects",
         # Umgangssprachliche "Habe ich X schon gemacht?"-Formulierungen (#11)
         "hab ich", "habe ich", "hab ich schon", "habe ich schon",
         "schon gemacht", "schon absolviert", "schon gehabt",
@@ -512,11 +524,16 @@ REGELN:
 8. Noten- und Fortschrittsfragen:
    - Nutze AUSSCHLIESSLICH die Daten unter "DEIN STUDIENERFOLG" fuer persoenliche Fragen.
    - Liste NUR Eintraege auf, die EXAKT so im Kontext stehen. Erfinde KEINE zusaetzlichen Eintraege.
+   - MASSGEBLICH ist immer die Zeile "Erreichte ECTS: X" in der ZUSAMMENFASSUNG.
+     Wenn der Nutzer selbst eine andere ECTS-Zahl behauptet (auch in vorherigen Nachrichten),
+     IGNORIERE diese und verwende ausschliesslich den Wert aus "Erreichte ECTS". Korrigiere
+     den Nutzer dabei freundlich ("Laut deinem Studienerfolg sind es X ECTS").
    - Bei Fragen nach Noten eines bestimmten Kurses: suche alle Eintraege die den gefragten Kursnamen enthalten. Liste nur diese auf, keine anderen Kurse.
-   - Bei "wie viele ECTS": nenne die ECTS-Summe aus der ZUSAMMENFASSUNG, nicht selbst zaehlen.
+   - Bei "wie viele ECTS": nenne EXAKT den Wert aus "Erreichte ECTS", zaehle nicht selbst.
    - Bei "Notendurchschnitt": nenne den Wert aus der ZUSAMMENFASSUNG.
-   - Bei "was fehlt mir noch": Das Bachelorstudium Wirtschaftsinformatik umfasst 180 ECTS.
-     Rechne: 180 minus bestandene ECTS = fehlende ECTS. Nenne NUR diese Zahl.
+   - Bei "wie viele ECTS fehlen mir / was fehlt mir noch": Das Bachelorstudium Wirtschaftsinformatik
+     umfasst 180 ECTS. Rechne: 180 minus "Erreichte ECTS" = fehlende ECTS. Nenne NUR diese Zahl.
+     Verwende NIEMALS eine vom Nutzer behauptete ECTS-Zahl fuer diese Rechnung.
      Liste KEINE konkreten fehlenden Kurse auf, da du nicht sicher weisst welche das sind.
      Empfehle stattdessen, den Studienfortschritt in KUSSS zu pruefen.
 

@@ -169,9 +169,13 @@ async def upload_ics(data: dict):
     user_id = data.get("user_id") or "test-user"
     if not ics_text:
         return {"saved": 0, "error": "Kein iCal-Inhalt erhalten."}
+    vevent_count = ics_text.count("BEGIN:VEVENT")
+    print(f"POST /upload-ics: empfangen len={len(ics_text)}, BEGIN:VEVENT={vevent_count}, user_id={user_id}")
     try:
         saved = ingest_ics_text(ics_text, user_id)
         print(f"POST /upload-ics: {saved} Events fuer user_id={user_id} gespeichert")
+        if saved == 0:
+            return {"saved": 0, "error": "Keine Termine in der Datei gefunden."}
         return {"saved": saved}
     except Exception as exc:
         print(f"POST /upload-ics error: {exc}")

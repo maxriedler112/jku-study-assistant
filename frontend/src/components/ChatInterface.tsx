@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Send, Paperclip, FileText, X, Mic, LogOut, Bell, User, LayoutDashboard, Calendar, BookOpen, Coffee, Map, HelpCircle, Sparkles, Clock, MapPin, Utensils } from 'lucide-react';
 import { StudyProgressView } from './StudyProgressView';
+import { ScheduleView, type ScheduleEvent } from './ScheduleView';
 
 interface Message {
   id: number;
@@ -54,6 +55,10 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
   } | null>(null);
   const [studyProgressLoading, setStudyProgressLoading] = useState(false);
 
+  // Stundenplan-Termine (aus iCal)
+  const [scheduleEvents, setScheduleEvents] = useState<ScheduleEvent[]>([]);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+
 
   const loadStudyProgress = async () => {
     try {
@@ -83,6 +88,62 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
       setStudyProgressLoading(false);
     }
   };
+  // Stundenplan-Termine vom Backend laden und fuer die Anzeige aufbereiten.
+  const loadScheduleEvents = async () => {
+    try {
+      setScheduleLoading(true);
+      const userId = username || localStorage.getItem('userId') || 'test-user';
+      const res = await fetch(`http://127.0.0.1:8001/events?user_id=${encodeURIComponent(userId)}`);
+      const data = await res.json();
+      const evs: ScheduleEvent[] = (data.events || []).map((e: any) => {
+        const dt = new Date(e.start_dt);
+        return {
+          id: e.id,
+          title: `${e.course_type ? e.course_type + ' ' : ''}${e.course_name}`,
+          date: dt.toLocaleDateString('de-AT'),
+          time: dt.toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit' }),
+          location: e.location || undefined,
+          start: e.start_dt,
+        };
+      });
+      setScheduleEvents(evs);
+    } catch (err) {
+      console.error('Termine konnten nicht geladen werden:', err);
+    } finally {
+      setScheduleLoading(false);
+    }
+  };
+
+  // iCal-Datei einlesen, ans Backend schicken (parsen + speichern), dann Termine laden.
+  const uploadSchedule = async (file: File) => {
+    try {
+      setScheduleLoading(true);
+      const text = await file.text();
+      const userId = username || localStorage.getItem('userId') || 'test-user';
+      const res = await fetch('http://127.0.0.1:8001/upload-ics', {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ics_text: text, user_id: userId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      // Rueckmeldung als Chat-Nachricht (Erfolg oder leere Datei).
+      const feedback: Message = {
+        id: messages.length + 1,
+        text: data.saved > 0
+          ? `✅ Stundenplan importiert: ${data.saved} Termine aus "${file.name}" gespeichert.`
+          : `⚠️ In "${file.name}" wurden keine Termine gefunden. Bitte exportiere in KUSSS einen Zeitraum mit Lehrveranstaltungen/Pruefungen.`,
+        sender: 'assistant',
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, feedback]);
+      await loadScheduleEvents();
+    } catch (err) {
+      console.error('iCal-Upload fehlgeschlagen:', err);
+      setScheduleLoading(false);
+    }
+  };
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -113,6 +174,12 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
   // Studienerfolgs-Daten vom Backend laden
   useEffect(() => {
     loadStudyProgress();
+  }, [username]);
+
+  // Stundenplan-Termine beim Laden holen
+  useEffect(() => {
+    loadScheduleEvents();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
   const handleSendMessage = (e: React.FormEvent) => {
@@ -311,31 +378,39 @@ export function ChatInterface({ username, onLogout }: ChatInterfaceProps) {
             </div>
           </div>
 
-          {/* Menu Items */}
-          <div className="flex-1 overflow-y-auto p-3 space-y-1">
-            {menuItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = activeMenu === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => handleMenuClick(item.id)}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all group ${
-                    isActive
-                      ? 'bg-white/20 text-white shadow-lg shadow-white/20'
-                      : 'text-gray-400 hover:bg-white/5 hover:text-white'
-                  }`}
-                >
-                  <Icon className={`w-5 h-5 ${isActive ? 'drop-shadow-[0_0_8px_rgba(255,255,255,0.8)]' : ''}`} />
-                  <span className="text-sm font-medium">{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
+          {/* Scrollbarer Bereich: Menue + Widgets */}
+          <div className="flex-1 overflow-y-auto min-h-0">
+            {/* Menu Items */}
+            <div className="p-3 space-y-1">
+              {menuItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = activeMenu === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => handleMenuClick(item.id)}
+                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all group ${
+                      isActive
+                        ? 'bg-white/20 text-white shadow-lg shadow-white/20'
+                        : 'text-gray-400 hover:bg-white/5 hover:text-white'
+                    }`}
+                  >
+                    <Icon className={`w-5 h-5 ${isActive ? 'drop-shadow-[0_0_8px_rgba(255,255,255,0.8)]' : ''}`} />
+                    <span className="text-sm font-medium">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
 
-          {/* Study Progress Section */}
-          <div className="px-3 py-3 border-t border-white/10">
-            <StudyProgressView data={studyProgress} isLoading={studyProgressLoading} onUpload={uploadStudyProgress} />
+            {/* Study Progress Section */}
+            <div className="px-3 py-3 border-t border-white/10">
+              <StudyProgressView data={studyProgress} isLoading={studyProgressLoading} onUpload={uploadStudyProgress} />
+            </div>
+
+            {/* Stundenplan Section */}
+            <div className="px-3 py-3 border-t border-white/10">
+              <ScheduleView events={scheduleEvents} isLoading={scheduleLoading} onUpload={uploadSchedule} />
+            </div>
           </div>
 
           {/* User Section */}
