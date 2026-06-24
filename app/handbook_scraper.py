@@ -14,8 +14,7 @@ Stufe 1 – Übersichtsseite (z.B. /curr/1193):
         - LV-Typ
         - ECTS
     • Speichert strukturierte Metadata für Retrieval und Filtering
-    • Extrahiert zusätzlich alle LVA-Detailseiten-Links
-      (Format: studienhandbuch.jku.at/XXXXXX)
+
 
 
 Stufe 2 – Jede LVA-Detailseite (z.B. /188056):
@@ -24,8 +23,6 @@ Stufe 2 – Jede LVA-Detailseite (z.B. /188056):
   • Lernergebnisse, Kompetenzen, Fertigkeiten, Kenntnisse
   • Beurteilungskriterien, Lehrmethoden, Literatur
   • ECTS, Semesterstunden, Abhaltungssprache, Teilungsziffer
-
-Ergebnis: statt 12 Chunks (nur Übersicht) → hunderte Chunks mit echtem Inhalt
 
 MANIFEST-FORMAT (data/handbooks.json):
   [
@@ -37,7 +34,6 @@ MANIFEST-FORMAT (data/handbooks.json):
     }
   ]
 
-Abhängigkeiten: pip install requests beautifulsoup4 python-dotenv supabase
 """
 
 from __future__ import annotations
@@ -51,19 +47,22 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from supabase import create_client, Client
-
+from supabase import Client
 
 from embeddings import EmbeddingService
 from pipeline import get_or_create_study_program, supabase as _pipeline_supabase
 
+# Umgebungsvariablen aus der .env-Datei laden
 load_dotenv()
 
-MANIFEST_PATH   = "data/handbooks.json"
-REQUEST_DELAY   = 1.0
+# Pfad zur Manifest-Datei mit den zu verarbeitenden Studienhandbüchern
+MANIFEST_PATH = "data/handbooks.json"
+# Wartezeit zwischen zwei HTTP-Anfragen (Sekunden)
+REQUEST_DELAY = 1.0
+# Maximale Wartezeit für eine HTTP-Anfrage (Sekunden)
 REQUEST_TIMEOUT = 20
-CHUNK_TABLE     = "chunks"
-BASE_URL        = "https://studienhandbuch.jku.at"
+CHUNK_TABLE = "chunks"
+BASE_URL = "https://studienhandbuch.jku.at"
 
 HEADERS = {
     "User-Agent": (
@@ -73,23 +72,27 @@ HEADERS = {
     "Accept-Language": "de,en;q=0.9",
 }
 
+# Bereits initialisierten Supabase-Client aus pipeline.py übernehmen
 supabase: Client = _pipeline_supabase
 
 LVA_TYPES = {"VL", "UE", "KV", "KS", "SE", "PR", "KT", "IK", "PJ", "PS", "PE", "VU", "VO", "KO", "AG"}
+
+
 # ===============================================================================
 # STUFE 1 - UEBERSICHTSSEITE
 # ===============================================================================
 
 def fetch_html(url: str) -> Optional[str]:
-    """Laedt eine URL und gibt das rohe HTML zurueck. None bei Fehler."""
+    # Laedt eine URL und gibt das rohe HTML zurueck. None bei Fehler
     try:
+        # http request py-->jku server
         resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        # load successful?
         resp.raise_for_status()
         return resp.text
     except requests.RequestException as e:
         print(f"    Fehler beim Laden von {url}: {e}")
         return None
-
 
 
 """
@@ -102,189 +105,219 @@ Darstellung:
     Gruppe/Fach
       VL/UE/KS/...
 
-Diese Funktion erzeugt strukturierte Overview-Chunks fuer:
+Diese Funktion erzeugt strukturierte Overview-Chunks für:
   • Module
   • Gruppen
   • konkrete Lehrveranstaltungen
 
 Zusätzlich werden strukturierte Metadata gespeichert:
+
+
   • module_name
-  • course_name
+  • group_name
   • lva_name
-  • course_type
+  • lva_type
+  • lva_url
   • ects
   • overview_level
+  • degree (Bachelor/Master)
+  • study_program
+  • source_url
+  • source_type (chunk origin: overview/lva_detail page)
+  • chunk_index
+
+
+
 """
 
+
 def extract_overview_rows(html: str, degree_name: str, degree_type: str):
+    # html text --> object
     soup = BeautifulSoup(html, "html.parser")
 
     rows = []
     current_module = None
     current_group = None
 
-
-
+    # Alle Tabellenzeilen der Übersichtsseite durchlaufen
     for tr in soup.find_all("tr"):
-            cells = [
-                td.get_text(" ", strip=True)
-                for td in tr.find_all(["td", "th"])
-            ]
+        cells = [
+            td.get_text(" ", strip=True)
+            for td in tr.find_all(["td", "th"])
+        ]
+        # Nur Zeilen mit genau 2 Spalten berücksichtigen (Name + ECTS)
+        if len(cells) != 2:
+            continue
 
-            if len(cells) != 2:
-                continue
+        title = cells[0].strip()
+        ects = cells[1].strip()
+        # Überprüfen ob die zweite Spalte eine Zahl ist
+        if not ects.replace(",", "").replace(".", "").isdigit():
+            continue
 
-            title = cells[0].strip()
-            ects = cells[1].strip()
+        # "....." Punkte löschen
+        # (z.B. ................ VL Algorithmen und Datenstrukturen --> VL Algorithmen und Datenstrukturen )
+        clean_title = title.replace(".", "").strip()
 
-            if not ects.replace(",", "").replace(".", "").isdigit():
-                continue
+        # z.B. VL Datenmodellierung --> ["VL", "Datenmodellierung"]
+        parts = clean_title.split()
+        # erste Wort nehmen (z.B. first_word = "VL")
+        first_word = parts[0] if parts else ""
 
-            clean_title = title.replace(".", "").strip()
-            parts = clean_title.split()
-            first_word = parts[0] if parts else ""
+        # unterscheiden zwischen Gruppe und LVA
+        is_lva = first_word in LVA_TYPES
 
-            is_lva = first_word in LVA_TYPES
+        # Level 1: Modul
+        # Nicht eingerückte Zeilen repräsentieren Module
+        if not title.startswith("."):
 
-            # Level 1: Modul
-            if not title.startswith("."):
-                current_module = clean_title
-                current_group = None
+            # Aktuelles Modul merken, damit nachfolgende Gruppen
+            # und Lehrveranstaltungen diesem Modul zugeordnet werden können.
+            current_module = clean_title
+            current_group = None
 
-                content = (
-                    f"Studium: {degree_name}. Typ: {degree_type}. "
-                    f"Modul: {current_module}. ECTS: {ects}."
-                )
+            # Textueller Chunk für die semantische Suche
+            # Der Inhalt wird später eingebettet und in Supabase gespeichert
+            content = (
+                f"Studium: {degree_name}. Typ: {degree_type}. "
+                f"Modul: {current_module}. ECTS: {ects}."
+            )
 
-                rows.append({
-                    "content": content,
-                    "metadata": {
-                        "study_program": degree_name,
-                        "degree": degree_type,
-                        "overview_level": "module",
-                        "module_name": current_module,
-                        "course_name": None,
-                        "course_type": None,
-                        "ects": ects,
-                    }
-                })
+            # Modul-Chunk zur Ergebnisliste (rows[]) hinzufügen
+            rows.append({
+                "content": content,
+                "metadata": {
+                    "study_program": degree_name,
+                    "degree": degree_type,
+                    "overview_level": "module",
+                    "module_name": current_module,
+                    "group_name": None,
+                    "lva_type": None,
+                    "ects": ects,
+                }
+            })
 
-            # Level 3: Lehrveranstaltung
-            # Wichtig: Einige LVAs haben keine Gruppe und stehen deshalb auf derselben
-            # Einrückungsebene wie Gruppen. Deshalb wird LVA über den Typ erkannt.
-            elif is_lva:
-                course_type = first_word
+        # Level 3: Lehrveranstaltung
+        # Einige LVAs haben keine Gruppe und stehen deshalb auf derselben Einrückungsebene wie Gruppen
+        # Deshalb wird LVA über den Typ erkannt
+        elif is_lva:
+            lva_type = first_word
 
-                link_tag = tr.find("a", href=True)
-                lva_url = None
+            # Link zur LVA-Detailseite aus der Tabellenzeile extrahieren
+            link_tag = tr.find("a", href=True)
+            lva_url = None
 
-                if link_tag:
-                    href = link_tag["href"].strip()
+            if link_tag:
+                href = link_tag["href"].strip()
 
-                    if href.startswith("http"):
-                        lva_url = href
-                    elif href.startswith("/"):
-                        lva_url = f"{BASE_URL}{href}"
+                if href.startswith("http"):
+                    lva_url = href
+                elif href.startswith("/"):
+                    lva_url = f"{BASE_URL}{href}"
 
-                content = (
-                    f"Studium: {degree_name}. Typ: {degree_type}. "
-                    f"Modul: {current_module}. Gruppe: {current_group}. "
-                    f"Lehrveranstaltung: {clean_title}. ECTS: {ects}."
-                )
+            content = (
+                f"Studium: {degree_name}. Typ: {degree_type}. "
+                f"Modul: {current_module}. Gruppe: {current_group}. "
+                f"Lehrveranstaltung: {clean_title}. ECTS: {ects}."
+            )
 
-                rows.append({
-                    "content": content,
-                    "metadata": {
-                        "study_program": degree_name,
-                        "degree": degree_type,
-                        "overview_level": "lva",
-                        "module_name": current_module,
-                        "course_name": current_group,
-                        "course_type": course_type,
-                        "lva_name": clean_title,
-                        "lva_url": lva_url,
-                        "ects": ects,
-                    }
-                })
+            rows.append({
+                "content": content,
+                "metadata": {
+                    "study_program": degree_name,
+                    "degree": degree_type,
+                    "overview_level": "lva",
+                    "module_name": current_module,
+                    "group_name": current_group,
+                    "lva_type": lva_type,
+                    "lva_name": clean_title,
+                    "lva_url": lva_url,
+                    "ects": ects
+                }
+            })
 
-            # Level 2: Gruppe / Fach
-            else:
-                current_group = clean_title
+        # Level 2: Gruppe
+        else:
+            current_group = clean_title
 
-                content = (
-                    f"Studium: {degree_name}. Typ: {degree_type}. "
-                    f"Modul: {current_module}. Gruppe: {current_group}. ECTS: {ects}."
-                )
+            content = (
+                f"Studium: {degree_name}. Typ: {degree_type}. "
+                f"Modul: {current_module}. Gruppe: {current_group}. ECTS: {ects}."
+            )
 
-                rows.append({
-                    "content": content,
-                    "metadata": {
-                        "study_program": degree_name,
-                        "degree": degree_type,
-                        "overview_level": "group",
-                        "module_name": current_module,
-                        "course_name": current_group,
-                        "course_type": None,
-                        "ects": ects,
-                    }
-                })
+            rows.append({
+                "content": content,
+                "metadata": {
+                    "study_program": degree_name,
+                    "degree": degree_type,
+                    "overview_level": "group",
+                    "module_name": current_module,
+                    "group_name": current_group,
+                    "lva_type": None,
+                    "ects": ects,
+                }
+            })
+
 
     return rows
-
-
-
-
-
-
-
 
 # ===============================================================================
 # STUFE 2 - LVA-DETAILSEITEN
 # ===============================================================================
 
+# Verarbeitet die Detailseite einer einzelnen Lehrveranstaltung.
+#
+# Aufgabe:
+#   - HTML der LVA-Detailseite analysieren
+#   - Relevante Abschnitte extrahieren
+#     (z.B. Lernergebnisse, Beurteilungskriterien, Literatur,
+#      Lehrmethoden, Anmeldevoraussetzungen, ...)
+#   - Strukturierte Chunks erzeugen
+#   - Metadaten der Übersichtsseite übernehmen
+#   - Chunks für Embedding und Speicherung vorbereiten
+
+
+"""
+Extrahiert strukturierte Chunks aus einer LVA-Detailseite
+
+Neben den Inhalten der Detailseite werden auch Metadaten aus der
+Studiengangsübersicht übernommen
+"""
+
+
 def extract_lva_chunks(
-    html: str,
-    url: str,
-    degree_name: str,
-    degree_type: str,
-    overview_metadata: dict | None = None,
+        html: str,
+        url: str,
+        degree_name: str,
+        degree_type: str,
+        overview_metadata: dict | None = None,
 ) -> list[dict]:
-    """
-    Extrahiert strukturierte semantische Chunks aus einer LVA-Detailseite.
-
-    WICHTIG:
-    - Nur vorhandene Felder/Sektionen werden gespeichert
-    - Metadata aus Ebene 1 werden uebernommen
-    """
-
     soup = BeautifulSoup(html, "html.parser")
 
-
-
-    # Unnoetige Bereiche entfernen
+    # Unnötige Bereiche entfernen
     for tag in soup.select(
-        "nav, header, footer, script, style, form, "
-        ".menu, #sidebar, .loginbox"
+            "nav, header, footer, script, style, form, "
+            ".menu, #sidebar, .loginbox"
     ):
+        # diese Bereiche (HTML Elemente) aus dem Dokument entfernen
         tag.decompose()
 
+    # Sammelliste für alle aus der LVA-Seite extrahierten Chunks
     chunks = []
 
+    # Hilfsfunktion zur Bereinigung extrahierter Texte
     def clean(value: str) -> str:
         return re.sub(r"\s+", " ", value or "").strip()
 
-
-
-
     def add_chunk(
-        section: str,
-        value: str,
-        extra_meta: dict | None = None,
+            # Section Beispiel: Lernergebnisse, VerantwortlicheR, Anmeldevoraussetzungen usw.
+            section: str,
+            value: str,
+            extra_meta: dict | None = None,
     ) -> None:
-        """
-        Fuegt nur sinnvolle/nicht-leere Chunks hinzu.
-        """
+
         value = clean(value)
+        # Falls der Text (fast) leer ist, kein Chunk erstellen
         if not value or len(value) < 3:
             return
 
@@ -319,36 +352,22 @@ def extract_lva_chunks(
             "metadata": metadata,
         })
 
+    # Hilfsfunktion zum Extrahieren eines Textbereichs zwischen
+    # zwei definierten Abschnittsmarkern (z.B. Kompetenzen und Fertigkeiten)
     def extract_between(text: str, start: str, end: str) -> str:
-            pattern = re.compile(
-                rf"{re.escape(start)}\s*(.*?)\s*{re.escape(end)}",
-                re.DOTALL
-            )
-            match = pattern.search(text)
-            return clean(match.group(1)) if match else ""
+        pattern = re.compile(
+            rf"{re.escape(start)}\s*(.*?)\s*{re.escape(end)}",
+            re.DOTALL
+        )
+        match = pattern.search(text)
+        return clean(match.group(1)) if match else ""
 
     # ---------------------------------------------------------------------------
-    # 1. Titel extrahieren
+    # 1. Tabellenfelder sammeln
     # ---------------------------------------------------------------------------
 
-    title_text = ""
-
-    h1 = soup.find(["h1", "h2"])
-    if h1:
-        title_text = clean(h1.get_text(" ", strip=True))
-
-    if not title_text:
-        title_tag = soup.find("title")
-        if title_tag:
-            title_text = clean(
-                title_tag.get_text(" ", strip=True)
-                .replace("Studienhandbuch |", "")
-            )
-
-    # ---------------------------------------------------------------------------
-    # 2. Tabellenfelder sammeln
-    # ---------------------------------------------------------------------------
-
+    # In diesem Dictionary werden alle auf der LVA-Detailseite gefundenen
+    # Felder zwischengespeichert. Später werden daraus einzelne Chunks erzeugt
     fields = {}
 
     # Header/Value-Tabelle auf LVA-Seiten erkennen
@@ -363,6 +382,7 @@ def extract_lva_chunks(
         ]
         cells = [c for c in cells if c]
 
+        # Die Kopfzeile der Metadaten-Tabelle wird an typischen Labels erkannt
         if "Workload" in cells and "VerantwortlicheR" in cells:
             next_tr = tr.find_next_sibling("tr")
             if next_tr:
@@ -372,10 +392,28 @@ def extract_lva_chunks(
                 ]
                 values = [v for v in values if v]
 
+                # Nur wenn Anzahl der Überschriften und Werte übereinstimmt,
+                # können sie sicher einander zugeordnet werden.
                 if len(values) == len(cells):
                     for key, value in zip(cells, values):
                         fields[key] = value
 
+    # Wichtige Basisfelder der LVA als eigene Chunks speichern
+    for label in [
+        "Workload",
+        "Ausbildungslevel",
+        "Studienfachbereich",
+        "VerantwortlicheR",
+        "Semesterstunden",
+        "Anbietende Uni",
+    ]:
+        if label in fields:
+            add_chunk(label, fields[label])
+    # ---------------------------------------------------------------------------
+    # 1b. Weitere Tabellenzeilen auslesen
+    # ---------------------------------------------------------------------------
+    # Zusätzlich zur Header/Value-Tabelle gibt es auf den Detailseiten auch
+    # klassische zweispaltige Key-Value-Zeilen sowie Tabellen mit mehreren Spalten.
     for tr in soup.find_all("tr"):
 
         cells = tr.find_all(["td", "th"], recursive=False)
@@ -384,19 +422,24 @@ def extract_lva_chunks(
             continue
 
         # Klassische Key-Value Zeilen
+        # Beispiel:
+        # Beurteilungskriterien | Schriftliche Abschlussklausur
         if len(cells) == 2:
 
             label = clean(cells[0].get_text(" ", strip=True))
             value = clean(cells[1].get_text(" ", strip=True))
 
             if label and value:
-                    if label not in [
-                        "Kompetenzen",
-                        "Fertigkeiten",
-                        "Kenntnisse",
-                    ]:
-                        fields[label] = value
 
+                # Kompetenzen, Fertigkeiten und Kenntnisse werden nicht hier
+                # als einfache Tabellenfelder gespeichert, sondern später
+                # strukturiert als Untersektionen der Lernergebnisse verarbeitet.
+                if label not in [
+                    "Kompetenzen",
+                    "Fertigkeiten",
+                    "Kenntnisse",
+                ]:
+                    fields[label] = value
 
         # Tabellen mit mehreren Spalten
         elif len(cells) > 2:
@@ -411,51 +454,18 @@ def extract_lva_chunks(
             if texts:
                 joined = " | ".join(texts)
 
+                # Nur Tabellenzeilen übernehmen, die tatsächlich
+                # organisatorische Metadaten enthalten.
                 if "ECTS" in joined or "SSt" in joined or "Workload" in joined:
                     fields["Metadaten"] = joined
 
     # ---------------------------------------------------------------------------
-    # 3. Basisinformationen-Chunk
-    # ---------------------------------------------------------------------------
-
-    basis_info = []
-
-    if title_text:
-        basis_info.append(title_text)
-
-    if "Metadaten" in fields:
-        basis_info.append(fields["Metadaten"])
-
-    if "Quellcurriculum" in fields:
-        basis_info.append(fields["Quellcurriculum"])
-
-    if basis_info:
-        add_chunk(
-            "Basisinformationen",
-            " ".join(basis_info)
-        )
-
-    for label in [
-        "Workload",
-        "Ausbildungslevel",
-        "Studienfachbereich",
-        "VerantwortlicheR",
-        "Semesterstunden",
-        "Anbietende Uni",
-    ]:
-        if label in fields:
-            add_chunk(label, fields[label])
-
-    # ---------------------------------------------------------------------------
-    # 4. Bekannte Sektionen
+    # 2. Bekannte Sektionen
     # ---------------------------------------------------------------------------
 
     section_labels = [
         "Anmeldevoraussetzungen",
         "Quellcurriculum",
-        "Kompetenzen",
-        "Fertigkeiten",
-        "Kenntnisse",
         "Beurteilungskriterien",
         "Lehrmethoden",
         "Abhaltungssprache",
@@ -469,16 +479,11 @@ def extract_lva_chunks(
     ]
 
     for label in section_labels:
-
         if label in fields:
-
-            add_chunk(
-                label,
-                fields[label]
-            )
+            add_chunk(label, fields[label])
 
     # ---------------------------------------------------------------------------
-    # 4a. Lernergebnisse-Untersektionen
+    # 2a. Lernergebnisse-Untersektionen
     # ---------------------------------------------------------------------------
 
     full_text = soup.get_text("\n", strip=True)
@@ -501,12 +506,6 @@ def extract_lva_chunks(
             lernergebnisse_block,
             flags=re.DOTALL
         )
-
-        if "VL Einführung in die Softwareentwicklung" in title_text:
-            print("\nDEBUG LERNERGEBNISSE BLOCK")
-            print(lernergebnisse_block)
-            print("\nDEBUG LO ITEMS")
-            print(lo_items)
 
         fertigkeiten_items = []
         kenntnisse_items = []
@@ -558,24 +557,14 @@ def extract_lva_chunks(
                 {"subsection": "Alle"}
             )
 
-
-
-
-
-
-
-
     return chunks
-
-
-
-
 
 # ===============================================================================
 # SUPABASE
 # ===============================================================================
 
-INSERT_BATCH_SIZE = 50   # Rows pro INSERT-Request (Supabase-Limit: ~500, konservativ)
+INSERT_BATCH_SIZE = 50  # Rows pro INSERT-Request (Supabase-Limit: ~500, konservativ)
+
 
 def _chunks_exist_for_program(study_program_id: str) -> bool:
     """Prueft ob fuer diesen Studiengang bereits Handbook-Chunks vorhanden sind."""
@@ -593,23 +582,23 @@ def _chunks_exist_for_program(study_program_id: str) -> bool:
 def _create_document(study_program_id: str, source_label: str) -> str:
     """Legt einen Dokument-Eintrag an und gibt die ID zurueck."""
     doc_result = supabase.table("documents").insert({
-        "user_id":          None,
-        "filename":         source_label,
-        "bucket_path":      None,
+        "user_id": None,
+        "filename": source_label,
+        "bucket_path": None,
         "study_program_id": study_program_id,
-        "status":           "processing",
+        "status": "processing",
     }).execute()
     return doc_result.data[0]["id"]
 
 
 def _batch_insert_chunks(
-    chunks: list[str],
-    embeddings: list[list[float]],
-    sources: list[str],
-    document_id: str,
-    chunk_type: str,
-    chunk_offset: int,
-    extra_metadata: list[dict] | None = None,
+        chunks: list[str],
+        embeddings: list[list[float]],
+        sources: list[str],
+        document_id: str,
+        chunk_type: str,
+        chunk_offset: int,
+        extra_metadata: list[dict] | None = None,
 ) -> int:
     """
     Speichert Chunks in Batches statt einzeln.
@@ -627,8 +616,8 @@ def _batch_insert_chunks(
             "source_type": chunk_type,
             "source_url": src,
             "chunk_index": chunk_offset + i,
-            "chunk_type": chunk_type,
-            "has_table": "|" in chunk,
+            "chunk_type": chunk_type
+
         }
 
         if extra_metadata and i < len(extra_metadata):
@@ -671,37 +660,38 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
       1. Studiengang anlegen (get_or_create) + Duplikat-Check
       2. Dokument-Eintrag anlegen
       3. Uebersichtsseite laden -> Text + LVA-Links extrahieren
-      4. Uebersichtstext chunken + embedden + speichern
-      5. Jede LVA-Detailseite laden -> Text extrahieren
-      6. Alle LVA-Texte gesammelt chunken + embedden + speichern
+      4. Strukturierte Overview-Chunks embedden und speichern
+      5. Jede LVA-Detailseite laden -> strukturierte LVA-Chunks extrahieren
+      6. Alle LVA-Chunks gesammelt embedden und speichern
       7. Dokument-Status -> "processed"
     """
-    code    = entry["code"]
-    name    = entry["name"]
-    degree  = entry.get("degree")
-    url     = entry["url"]
+    code = entry["code"]
+    name = entry["name"]
+    degree = entry.get("degree")
+    url = entry["url"]
     source_label = f"handbook_{code.replace('/', '-')}"
 
     print(f"\n📚 Verarbeite: {code} - {name} ({degree or 'unbekannt'})")
 
     program_id = get_or_create_study_program(code, name, degree)
 
-    #if _chunks_exist_for_program(program_id):
-        #print(f"   Bereits vorhanden - ueberspringe.")
-        #return 0
+    # Doppelte Ingestion desselben Studienhandbuchs vermeiden
+    if _chunks_exist_for_program(program_id):
+        print(f"   Bereits vorhanden - ueberspringe.")
+        return 0
 
     document_id = _create_document(program_id, source_label)
 
     try:
-        total_saved  = 0
+        total_saved = 0
         chunk_offset = 0
 
         # Stufe 1: Uebersichtsseite
-        print(f"   Lade Uebersichtsseite...")
+        print(f"   Lade Übersichtsseite...")
         overview_html = fetch_html(url)
 
         if not overview_html:
-            raise ValueError(f"Uebersichtsseite nicht erreichbar: {url}")
+            raise ValueError(f"Übersichtsseite nicht erreichbar: {url}")
 
         # Neue strukturierte Overview-Extraktion
         overview_rows = extract_overview_rows(overview_html, name, degree)
@@ -723,17 +713,12 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
             if lva_url:
                 overview_metadata_by_url[lva_url] = metadata
 
-
-
-
         if overview_rows:
             ov_chunks = [r["content"] for r in overview_rows]
             ov_metadata = [r["metadata"] for r in overview_rows]
 
-            print(f"   Generiere Embeddings fuer {len(ov_chunks)} Overview-Chunks...")
+            print(f"   Generiere Embeddings für {len(ov_chunks)} Overview-Chunks...")
             ov_embeddings = embed_service.embed_texts(ov_chunks)
-
-
 
             saved = _batch_insert_chunks(
                 ov_chunks,
@@ -752,9 +737,8 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
         else:
             print("   Keine strukturierten Overview-Zeilen gefunden.")
 
-
         # Stufe 2: LVA-Detailseiten
-        print(f"   Scrape {len(lva_urls)} von {len(lva_urls)} LVA-Seiten zum Test...")
+        print(f"   Scrape {len(lva_urls)} LVA-Seiten...")
 
         all_lva_chunks: list[str] = []
         all_lva_sources: list[str] = []
@@ -767,9 +751,6 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
 
             if not lva_html:
                 continue
-
-
-
 
             lva_items = extract_lva_chunks(
                 lva_html,
@@ -784,10 +765,10 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
                 all_lva_sources.append(lva_url)
                 all_lva_metadata.append(item["metadata"])
 
-            print(f"      {i}/{len(lva_items)} LVAs geladen...")
+            print(f"      {i}/{len(lva_urls)} LVA-Seiten geladen...")
 
         if all_lva_chunks:
-            print(f"   Generiere Embeddings fuer {len(all_lva_chunks)} LVA-Chunks...")
+            print(f"   Generiere Embeddings für {len(all_lva_chunks)} LVA-Chunks...")
 
             lva_embeddings = embed_service.embed_texts(all_lva_chunks)
 
@@ -826,7 +807,7 @@ def scrape_program(entry: dict, embed_service: EmbeddingService) -> int:
 
 
 def run_scraper(manifest_path: str = MANIFEST_PATH) -> None:
-    """Liest das Manifest und scrapt alle darin aufgefuehrten Studienganege."""
+    """Liest das Manifest und scrapt alle darin aufgefuehrten Studiengänge."""
     if not os.path.exists(manifest_path):
         print(f"Manifest nicht gefunden: {manifest_path}")
         return
@@ -838,17 +819,17 @@ def run_scraper(manifest_path: str = MANIFEST_PATH) -> None:
         print("Manifest ist leer.")
         return
 
-    print(f"Starte Scraping fuer {len(entries)} Studiengaenge...")
+    print(f"Starte Scraping für {len(entries)} Studiengänge...")
     embed_service = EmbeddingService()
 
-    total_chunks  = 0
+    total_chunks = 0
     success_count = 0
-    error_count   = 0
+    error_count = 0
 
     for entry in entries:
         try:
             n = scrape_program(entry, embed_service)
-            total_chunks  += n
+            total_chunks += n
             success_count += 1
         except Exception as e:
             print(f"   FEHLER bei {entry.get('name')}: {e}")
