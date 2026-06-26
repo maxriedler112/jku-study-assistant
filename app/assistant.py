@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq, APIStatusError
 from supabase import create_client, Client
 from search import search_jku_knowledge
 
@@ -146,6 +146,30 @@ def query_events(question: str, user_id: str) -> str:
         lines.append(line)
 
     return "\n".join(lines)
+
+
+def _user_has_any_events(user_id: str) -> bool:
+    """
+    Prueft, ob fuer den Nutzer ueberhaupt Kalender-Events gespeichert sind.
+
+    Wichtig, um "kein Kalender hochgeladen" von "Kalender vorhanden, aber im
+    erfragten Zeitraum keine Termine" zu unterscheiden. Sonst meldet der Assistent
+    faelschlich, es sei kein Kalender hinterlegt (siehe Eval #14 "Was steht morgen an?").
+    """
+    if not _is_valid_user_id(user_id):
+        return False
+    try:
+        resp = (
+            supabase.table("events")
+            .select("id")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
+    except Exception as exc:
+        print(f"_user_has_any_events: uebersprungen ({exc})")
+        return False
 
 
 def query_grades(user_id: str) -> str:
@@ -368,11 +392,22 @@ def ask_assistant(
 
     context_parts = []
 
-    # 1a. Zeitbasierte Frage → Persönliche KUSSS-Termine einspeisen
+    # 1a. Zeitbasierte Frage → Persönliche KUSSS-Termine einspeisen.
+    #     Leeren Treffer differenzieren: "kein Kalender" vs. "Kalender da, aber
+    #     keine Termine im erfragten Zeitraum" (sonst falsche Aussage, Eval #14).
     if user_id and _is_valid_user_id(user_id) and is_time_based(question):
         events_text = query_events(question, user_id)
         if events_text:
             context_parts.append(f"KALENDER-EINTRAEGE:\n{events_text}")
+        elif _user_has_any_events(user_id):
+            context_parts.append(
+                "KALENDER-STATUS: Es ist ein Kalender hinterlegt, aber im erfragten "
+                "Zeitraum gibt es keine Termine."
+            )
+        else:
+            context_parts.append(
+                "KALENDER-STATUS: Fuer diesen Nutzer ist noch kein Kalender hinterlegt."
+            )
 
     # 1b. Noten-Frage → Studienerfolg (Notennachweis) anhängen
     if user_id and _is_valid_user_id(user_id) and _is_grade_question(question):
@@ -433,8 +468,6 @@ def ask_assistant(
                 0 if r.get("metadata", {}).get("chunk_type") in ("curriculum_row", "overview_table")
                 else 1
             ))
-        chunks_text = "\n\n---\n\n".join([res["content"] for res in results])
-        context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
 
     # Name des aktuell gewaehlten Studiengangs (fuer Systemgrenzen-Hinweise im Prompt)
     selected_program = None
@@ -449,15 +482,24 @@ def ask_assistant(
         else "Der Nutzer hat einen Studiengang ueber den Filter ausgewaehlt."
     )
 
-    # Kontext final zusammenbauen oder Fallback definieren
-    context_text = (
-        "\n\n".join(context_parts)
-        if context_parts
-        else "Keine relevanten Informationen in der Wissensdatenbank gefunden."
-    )
+    # Curriculum-Chunks separat halten, damit sie bei einem Token-Limit-Fehler
+    # (Groq 413) schrittweise reduziert werden koennen (Eval #18 "STEOP").
+    def _context_text(n_chunks: int) -> str:
+        parts = list(context_parts)
+        if results and n_chunks > 0:
+            chunks_text = "\n\n---\n\n".join(
+                res["content"] for res in results[:n_chunks]
+            )
+            parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
+        return (
+            "\n\n".join(parts)
+            if parts
+            else "Keine relevanten Informationen in der Wissensdatenbank gefunden."
+        )
 
-    # Strict System Prompt zur Einhaltung der JKU-Datenhierarchie definieren
-    system_prompt = f"""Du bist ein hilfreicher Studien-Assistent fuer die JKU Linz.
+    # Strict System Prompt zur Einhaltung der JKU-Datenhierarchie definieren.
+    # Der Kontext wird erst beim Bauen der Nachricht angehaengt (s. _build_messages).
+    system_prompt_prefix = f"""Du bist ein hilfreicher Studien-Assistent fuer die JKU Linz.
 Nutze NUR den unten stehenden Kontext fuer deine Antwort.
 Heute ist der {date.today().strftime('%d.%m.%Y')}.
 {program_hint}
@@ -541,16 +583,24 @@ REGELN:
    - Wenn "KALENDER-EINTRAEGE" im Kontext stehen, beantworte Fragen nach Stundenplan,
      Terminen, Pruefungen oder "diese/naechste Woche" DIREKT anhand dieser Eintraege
      (mit Datum, Uhrzeit und Raum).
-   - Behaupte NIEMALS, du haettest keinen Zugriff auf persoenliche Termine/Stundenplaene,
-     wenn KALENDER-EINTRAEGE vorhanden sind. Diese gelten unabhaengig vom gewaehlten Studiengang.
+   - Steht "KALENDER-STATUS: ... im erfragten Zeitraum gibt es keine Termine": sage
+     freundlich, dass im gefragten Zeitraum (z.B. morgen bzw. diese Woche) keine Termine
+     eingetragen sind. Behaupte dabei NICHT, es sei gar kein Kalender vorhanden.
+   - Steht "KALENDER-STATUS: ... noch kein Kalender hinterlegt": sage, dass derzeit kein
+     Kalender hochgeladen ist, und erklaere den Import: in KUSSS unter
+     "Mein Stundenplan -> Export -> iCalendar" die .ics-Datei exportieren und sie im
+     Stundenplan-Bereich der App hochladen.
+   - Behaupte NIEMALS, du haettest keinen Zugriff auf persoenliche Termine/Stundenplaene.
+     Persoenliche Termine gelten unabhaengig vom gewaehlten Studiengang.
 
 10. Ton & Formulierung:
    - Antworte freundlich, klar und in vollstaendigen deutschen Saetzen.
    - Bleibe praezise und fasse dich kurz; keine internen Hinweise wie "laut Kontext"
      oder "im Kontext steht". Formuliere die Antwort direkt fuer die studierende Person.
+   - Nenne im Antworttext NIEMALS interne Abschnittsnamen oder Label aus dem Kontext
+     (z.B. KALENDER-EINTRAEGE, KALENDER-STATUS, CURRICULUM-INFORMATIONEN, DEIN STUDIENERFOLG).
 
 KONTEXT:
-{context_text}
 """
 
     # 5. Nachrichten zusammenbauen: System-Prompt + bisherige Historie + aktuelle Frage.
@@ -560,20 +610,32 @@ KONTEXT:
         for m in history[-6:]
         if m.get("role") in ("user", "assistant") and m.get("content")
     ]
-    messages = (
-        [{"role": "system", "content": system_prompt}]
-        + recent_history
-        + [{"role": "user", "content": question}]
-    )
 
-    # 6. API-Inferenz über Groq ausführen
-    chat_completion = client.chat.completions.create(
-        messages=messages,
-        model="llama-3.1-8b-instant",
-        temperature=0.2, # Niedrige Temperatur für geringe Halluzinationsanfälligkeit
-    )
+    def _build_messages(n_chunks: int) -> list[dict]:
+        system_prompt = system_prompt_prefix + _context_text(n_chunks)
+        return (
+            [{"role": "system", "content": system_prompt}]
+            + recent_history
+            + [{"role": "user", "content": question}]
+        )
 
-    return chat_completion.choices[0].message.content
+    # 6. API-Inferenz über Groq. Bei Token-Limit (413 "Request too large") den
+    #    Curriculum-Kontext halbieren und erneut versuchen, statt mit Fehler abzubrechen.
+    n_chunks = len(results)
+    while True:
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=_build_messages(n_chunks),
+                model="llama-3.1-8b-instant",
+                temperature=0.2,  # Niedrige Temperatur für geringe Halluzinationsanfälligkeit
+            )
+            return chat_completion.choices[0].message.content
+        except APIStatusError as exc:
+            if getattr(exc, "status_code", None) == 413 and n_chunks > 1:
+                n_chunks = n_chunks // 2
+                print(f"ask_assistant: Token-Limit (413) – reduziere auf {n_chunks} Chunks und versuche erneut")
+                continue
+            raise
 
 
 if __name__ == "__main__":
