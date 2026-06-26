@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq, APIStatusError
 from supabase import create_client, Client
 from search import search_jku_knowledge
 
@@ -146,6 +146,30 @@ def query_events(question: str, user_id: str) -> str:
         lines.append(line)
 
     return "\n".join(lines)
+
+
+def _user_has_any_events(user_id: str) -> bool:
+    """
+    Prueft, ob fuer den Nutzer ueberhaupt Kalender-Events gespeichert sind.
+
+    Wichtig, um "kein Kalender hochgeladen" von "Kalender vorhanden, aber im
+    erfragten Zeitraum keine Termine" zu unterscheiden. Sonst meldet der Assistent
+    faelschlich, es sei kein Kalender hinterlegt (siehe Eval #14 "Was steht morgen an?").
+    """
+    if not _is_valid_user_id(user_id):
+        return False
+    try:
+        resp = (
+            supabase.table("events")
+            .select("id")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
+    except Exception as exc:
+        print(f"_user_has_any_events: uebersprungen ({exc})")
+        return False
 
 
 def query_grades(user_id: str) -> str:
@@ -341,6 +365,43 @@ def _is_duration_question(question: str) -> bool:
     return any(kw in q for kw in duration_keywords)
 
 
+def _is_summer_start_sequence_question(question: str) -> bool:
+    """
+    Erkennt Fragen nach dem empfohlenen Studienverlauf bei Studienbeginn im
+    SOMMERSEMESTER. Fuer diesen Fall existiert KEINE strukturierte, semesterweise
+    Empfehlung in den Daten (nur fuer Beginn im Wintersemester) – das PDF dazu ist
+    ein nicht-OCR-tes Bild. Ohne Guardrail adaptiert das Modell faelschlich die
+    Wintersemester-Liste und erfindet eine Antwort (Eval #19).
+    """
+    q = question.lower()
+    summer = any(k in q for k in [
+        "sommersemester", "im sommer angefangen", "im sommer begonnen", " im ss ",
+    ])
+    sequence = ("semester" in q) and any(k in q for k in [
+        "studienverlauf", "empfohlen", "empfehlen", "empfiehlst", "sollte ich",
+        "welche fächer", "welche kurse", "welche lvas", "welche lehrveranstaltungen",
+    ])
+    return summer and sequence
+
+
+def _extract_quoted_terms(question: str) -> list[str]:
+    """
+    Extrahiert in Anfuehrungszeichen gesetzte Begriffe (z.B. den Fachnamen in
+    "wie viele ECTS fehlen mir im Pflichtfach 'Data & Knowledge Engineering'").
+    Beruecksichtigt gerade und typografische Anfuehrungszeichen.
+    """
+    terms = re.findall(r"[\"'„“”‚‘’«»]"
+                       r"([^\"'„“”‚‘’«»]{3,80})"
+                       r"[\"'„“”‚‘’«»]", question)
+    seen, out = set(), []
+    for t in terms:
+        t = t.strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
+
+
 def ask_assistant(
     question: str,
     user_id: str = None,
@@ -368,17 +429,40 @@ def ask_assistant(
 
     context_parts = []
 
-    # 1a. Zeitbasierte Frage → Persönliche KUSSS-Termine einspeisen
+    # 1a. Zeitbasierte Frage → Persönliche KUSSS-Termine einspeisen.
+    #     Leeren Treffer differenzieren: "kein Kalender" vs. "Kalender da, aber
+    #     keine Termine im erfragten Zeitraum" (sonst falsche Aussage, Eval #14).
     if user_id and _is_valid_user_id(user_id) and is_time_based(question):
         events_text = query_events(question, user_id)
         if events_text:
             context_parts.append(f"KALENDER-EINTRAEGE:\n{events_text}")
+        elif _user_has_any_events(user_id):
+            context_parts.append(
+                "KALENDER-STATUS: Es ist ein Kalender hinterlegt, aber im erfragten "
+                "Zeitraum gibt es keine Termine."
+            )
+        else:
+            context_parts.append(
+                "KALENDER-STATUS: Fuer diesen Nutzer ist noch kein Kalender hinterlegt."
+            )
 
     # 1b. Noten-Frage → Studienerfolg (Notennachweis) anhängen
     if user_id and _is_valid_user_id(user_id) and _is_grade_question(question):
         grades_text = query_grades(user_id)
         if grades_text:
             context_parts.append(f"DEIN STUDIENERFOLG:\n{grades_text}")
+
+    # 1c. Guardrail Studienverlauf Sommersemester-Beginn: Dafuer fehlt die
+    #     strukturierte semesterweise Empfehlung (nur Wintersemester vorhanden).
+    #     Expliziter Hinweis verhindert, dass das Modell die WS-Liste als SS-Antwort
+    #     ausgibt oder eine Reihenfolge erfindet (Eval #19).
+    if _is_summer_start_sequence_question(question):
+        context_parts.append(
+            "HINWEIS STUDIENVERLAUF: Fuer den Studienbeginn im SOMMERSEMESTER liegt "
+            "KEINE strukturierte, semesterweise Empfehlung vor (nur fuer Beginn im "
+            "Wintersemester). Erfinde KEINE Faecherliste fuer den Sommersemester-Start "
+            "und gib NICHT die Wintersemester-Liste als Sommersemester-Empfehlung aus."
+        )
 
     # 2. Dynamische Steuerung der Ähnlichkeitssuche (Chunk-Menge steuern)
     #    Werte bewusst moderat, um unter dem Groq-TPM-Limit (6000) zu bleiben.
@@ -419,6 +503,29 @@ def ask_assistant(
                 unique_results.append(r)
         results = unique_results
 
+    # 3c. Gezielte Verstaerkung fuer konkret benannte Faecher (in Anfuehrungszeichen).
+    #     Sicherstellen, dass die EXAKTE Curriculum-Zeile des Fachs (Gesamt-ECTS) im
+    #     Kontext landet – sonst verwechselt das Modell ein 6-ECTS-Teilfach mit dem
+    #     12-ECTS-Pflichtfach (Eval #3 "ECTS fehlen im Pflichtfach Data & Knowledge Engineering").
+    if _is_grade_question(question) or _is_structured_question(question):
+        existing_contents = {r.get("content") for r in results}
+        for term in _extract_quoted_terms(question):
+            try:
+                extra = search_jku_knowledge(
+                    term, study_program_id=study_program_id, match_count=4
+                )
+            except Exception as exc:
+                print(f"ask_assistant: Term-Suche '{term}' uebersprungen ({exc})")
+                continue
+            for r in extra:
+                if (
+                    r.get("metadata", {}).get("chunk_type") == "curriculum_row"
+                    and r.get("content")
+                    and r["content"] not in existing_contents
+                ):
+                    results.insert(0, r)  # nach vorne, damit es im Kontext bleibt
+                    existing_contents.add(r["content"])
+
     # 4. Suchergebnisse sortieren (Tabellen/Curriculum-Zeilen vor unstrukturierten Web-Daten ranken)
     if results:
         if duration_question:
@@ -433,8 +540,6 @@ def ask_assistant(
                 0 if r.get("metadata", {}).get("chunk_type") in ("curriculum_row", "overview_table")
                 else 1
             ))
-        chunks_text = "\n\n---\n\n".join([res["content"] for res in results])
-        context_parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
 
     # Name des aktuell gewaehlten Studiengangs (fuer Systemgrenzen-Hinweise im Prompt)
     selected_program = None
@@ -449,15 +554,24 @@ def ask_assistant(
         else "Der Nutzer hat einen Studiengang ueber den Filter ausgewaehlt."
     )
 
-    # Kontext final zusammenbauen oder Fallback definieren
-    context_text = (
-        "\n\n".join(context_parts)
-        if context_parts
-        else "Keine relevanten Informationen in der Wissensdatenbank gefunden."
-    )
+    # Curriculum-Chunks separat halten, damit sie bei einem Token-Limit-Fehler
+    # (Groq 413) schrittweise reduziert werden koennen (Eval #18 "STEOP").
+    def _context_text(n_chunks: int) -> str:
+        parts = list(context_parts)
+        if results and n_chunks > 0:
+            chunks_text = "\n\n---\n\n".join(
+                res["content"] for res in results[:n_chunks]
+            )
+            parts.append(f"CURRICULUM-INFORMATIONEN:\n{chunks_text}")
+        return (
+            "\n\n".join(parts)
+            if parts
+            else "Keine relevanten Informationen in der Wissensdatenbank gefunden."
+        )
 
-    # Strict System Prompt zur Einhaltung der JKU-Datenhierarchie definieren
-    system_prompt = f"""Du bist ein hilfreicher Studien-Assistent fuer die JKU Linz.
+    # Strict System Prompt zur Einhaltung der JKU-Datenhierarchie definieren.
+    # Der Kontext wird erst beim Bauen der Nachricht angehaengt (s. _build_messages).
+    system_prompt_prefix = f"""Du bist ein hilfreicher Studien-Assistent fuer die JKU Linz.
 Nutze NUR den unten stehenden Kontext fuer deine Antwort.
 Heute ist der {date.today().strftime('%d.%m.%Y')}.
 {program_hint}
@@ -509,6 +623,11 @@ REGELN:
 
 7. Fehlende Informationen & Systemgrenzen:
    - Erfinde NIEMALS Kurse, ECTS-Werte oder Pruefungsmodalitaeten.
+   - Steht im Kontext "HINWEIS STUDIENVERLAUF: ... Sommersemester ... KEINE ...
+     Empfehlung": sage freundlich, dass fuer den Studienbeginn im Sommersemester keine
+     offizielle semesterweise Empfehlung vorliegt, und verweise auf Curriculum,
+     Studienhandbuch oder KUSSS. Gib KEINE erfundene und KEINE aus dem Wintersemester
+     uebernommene Faecherliste aus.
    - Wenn die Frage zum gewaehlten Studiengang passt, aber die Antwort nicht im Kontext steht:
      sage freundlich, dass dir diese konkrete Information nicht vorliegt, und empfiehl,
      im offiziellen Curriculum, im Studienhandbuch oder in KUSSS nachzusehen.
@@ -531,26 +650,44 @@ REGELN:
    - Bei Fragen nach Noten eines bestimmten Kurses: suche alle Eintraege die den gefragten Kursnamen enthalten. Liste nur diese auf, keine anderen Kurse.
    - Bei "wie viele ECTS": nenne EXAKT den Wert aus "Erreichte ECTS", zaehle nicht selbst.
    - Bei "Notendurchschnitt": nenne den Wert aus der ZUSAMMENFASSUNG.
-   - Bei "wie viele ECTS fehlen mir / was fehlt mir noch": Das Bachelorstudium Wirtschaftsinformatik
-     umfasst 180 ECTS. Rechne: 180 minus "Erreichte ECTS" = fehlende ECTS. Nenne NUR diese Zahl.
-     Verwende NIEMALS eine vom Nutzer behauptete ECTS-Zahl fuer diese Rechnung.
+   - Bei "wie viele ECTS fehlen mir / was fehlt mir noch" (Studium gesamt): Das Bachelorstudium
+     Wirtschaftsinformatik umfasst 180 ECTS. Rechne: 180 minus "Erreichte ECTS" = fehlende ECTS.
+     Nenne NUR diese Zahl. Verwende NIEMALS eine vom Nutzer behauptete ECTS-Zahl fuer diese Rechnung.
      Liste KEINE konkreten fehlenden Kurse auf, da du nicht sicher weisst welche das sind.
      Empfehle stattdessen, den Studienfortschritt in KUSSS zu pruefen.
+   - Bei "wie viele ECTS fehlen mir im (Pflicht)fach X" (X ist ein KONKRETES Fach):
+     1. Nimm die GESAMT-ECTS von X aus dem Curriculum-Eintrag, dessen "Bezeichnung" GENAU X ist
+        (z.B. "Data & Knowledge Engineering" -> 12 ECTS). Verwende dafuer NICHT die Teilfaecher
+        "Methoden und Konzepte des X" / "Anwendungen des X" (je 6) und NICHT einzelne LVAs (3).
+     2. Bestimme die im Fach bereits absolvierten ECTS: Summiere ALLE passenden absolvierten
+        Eintraege aus DEIN STUDIENERFOLG. Eine genannte Lehrveranstaltung besteht meist aus
+        mehreren Teilen (VL + UE) – zaehle diese ZUSAMMEN (z.B. "Datenmodellierung" VL 3 +
+        UE 3 = 6 ECTS). Eine einzelne VL oder UE allein ist NICHT der volle Wert.
+     3. Antworte mit: Gesamt-ECTS minus absolvierte ECTS = fehlende ECTS (z.B. 12 - 6 = 6).
+     Nenne sowohl die Gesamtzahl als auch die fehlende Zahl.
 
 9. Kalender / Stundenplan / Termine:
    - Wenn "KALENDER-EINTRAEGE" im Kontext stehen, beantworte Fragen nach Stundenplan,
      Terminen, Pruefungen oder "diese/naechste Woche" DIREKT anhand dieser Eintraege
      (mit Datum, Uhrzeit und Raum).
-   - Behaupte NIEMALS, du haettest keinen Zugriff auf persoenliche Termine/Stundenplaene,
-     wenn KALENDER-EINTRAEGE vorhanden sind. Diese gelten unabhaengig vom gewaehlten Studiengang.
+   - Steht "KALENDER-STATUS: ... im erfragten Zeitraum gibt es keine Termine": sage
+     freundlich, dass im gefragten Zeitraum (z.B. morgen bzw. diese Woche) keine Termine
+     eingetragen sind. Behaupte dabei NICHT, es sei gar kein Kalender vorhanden.
+   - Steht "KALENDER-STATUS: ... noch kein Kalender hinterlegt": sage, dass derzeit kein
+     Kalender hochgeladen ist, und erklaere den Import: in KUSSS unter
+     "Mein Stundenplan -> Export -> iCalendar" die .ics-Datei exportieren und sie im
+     Stundenplan-Bereich der App hochladen.
+   - Behaupte NIEMALS, du haettest keinen Zugriff auf persoenliche Termine/Stundenplaene.
+     Persoenliche Termine gelten unabhaengig vom gewaehlten Studiengang.
 
 10. Ton & Formulierung:
    - Antworte freundlich, klar und in vollstaendigen deutschen Saetzen.
    - Bleibe praezise und fasse dich kurz; keine internen Hinweise wie "laut Kontext"
      oder "im Kontext steht". Formuliere die Antwort direkt fuer die studierende Person.
+   - Nenne im Antworttext NIEMALS interne Abschnittsnamen oder Label aus dem Kontext
+     (z.B. KALENDER-EINTRAEGE, KALENDER-STATUS, CURRICULUM-INFORMATIONEN, DEIN STUDIENERFOLG).
 
 KONTEXT:
-{context_text}
 """
 
     # 5. Nachrichten zusammenbauen: System-Prompt + bisherige Historie + aktuelle Frage.
@@ -560,20 +697,32 @@ KONTEXT:
         for m in history[-6:]
         if m.get("role") in ("user", "assistant") and m.get("content")
     ]
-    messages = (
-        [{"role": "system", "content": system_prompt}]
-        + recent_history
-        + [{"role": "user", "content": question}]
-    )
 
-    # 6. API-Inferenz über Groq ausführen
-    chat_completion = client.chat.completions.create(
-        messages=messages,
-        model="llama-3.1-8b-instant",
-        temperature=0.2, # Niedrige Temperatur für geringe Halluzinationsanfälligkeit
-    )
+    def _build_messages(n_chunks: int) -> list[dict]:
+        system_prompt = system_prompt_prefix + _context_text(n_chunks)
+        return (
+            [{"role": "system", "content": system_prompt}]
+            + recent_history
+            + [{"role": "user", "content": question}]
+        )
 
-    return chat_completion.choices[0].message.content
+    # 6. API-Inferenz über Groq. Bei Token-Limit (413 "Request too large") den
+    #    Curriculum-Kontext halbieren und erneut versuchen, statt mit Fehler abzubrechen.
+    n_chunks = len(results)
+    while True:
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=_build_messages(n_chunks),
+                model="llama-3.1-8b-instant",
+                temperature=0.2,  # Niedrige Temperatur für geringe Halluzinationsanfälligkeit
+            )
+            return chat_completion.choices[0].message.content
+        except APIStatusError as exc:
+            if getattr(exc, "status_code", None) == 413 and n_chunks > 1:
+                n_chunks = n_chunks // 2
+                print(f"ask_assistant: Token-Limit (413) – reduziere auf {n_chunks} Chunks und versuche erneut")
+                continue
+            raise
 
 
 if __name__ == "__main__":
