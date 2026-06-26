@@ -365,6 +365,24 @@ def _is_duration_question(question: str) -> bool:
     return any(kw in q for kw in duration_keywords)
 
 
+def _extract_quoted_terms(question: str) -> list[str]:
+    """
+    Extrahiert in Anfuehrungszeichen gesetzte Begriffe (z.B. den Fachnamen in
+    "wie viele ECTS fehlen mir im Pflichtfach 'Data & Knowledge Engineering'").
+    Beruecksichtigt gerade und typografische Anfuehrungszeichen.
+    """
+    terms = re.findall(r"[\"'„“”‚‘’«»]"
+                       r"([^\"'„“”‚‘’«»]{3,80})"
+                       r"[\"'„“”‚‘’«»]", question)
+    seen, out = set(), []
+    for t in terms:
+        t = t.strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
+
+
 def ask_assistant(
     question: str,
     user_id: str = None,
@@ -453,6 +471,29 @@ def ask_assistant(
                 seen.add(content)
                 unique_results.append(r)
         results = unique_results
+
+    # 3c. Gezielte Verstaerkung fuer konkret benannte Faecher (in Anfuehrungszeichen).
+    #     Sicherstellen, dass die EXAKTE Curriculum-Zeile des Fachs (Gesamt-ECTS) im
+    #     Kontext landet – sonst verwechselt das Modell ein 6-ECTS-Teilfach mit dem
+    #     12-ECTS-Pflichtfach (Eval #3 "ECTS fehlen im Pflichtfach Data & Knowledge Engineering").
+    if _is_grade_question(question) or _is_structured_question(question):
+        existing_contents = {r.get("content") for r in results}
+        for term in _extract_quoted_terms(question):
+            try:
+                extra = search_jku_knowledge(
+                    term, study_program_id=study_program_id, match_count=4
+                )
+            except Exception as exc:
+                print(f"ask_assistant: Term-Suche '{term}' uebersprungen ({exc})")
+                continue
+            for r in extra:
+                if (
+                    r.get("metadata", {}).get("chunk_type") == "curriculum_row"
+                    and r.get("content")
+                    and r["content"] not in existing_contents
+                ):
+                    results.insert(0, r)  # nach vorne, damit es im Kontext bleibt
+                    existing_contents.add(r["content"])
 
     # 4. Suchergebnisse sortieren (Tabellen/Curriculum-Zeilen vor unstrukturierten Web-Daten ranken)
     if results:
@@ -573,11 +614,21 @@ REGELN:
    - Bei Fragen nach Noten eines bestimmten Kurses: suche alle Eintraege die den gefragten Kursnamen enthalten. Liste nur diese auf, keine anderen Kurse.
    - Bei "wie viele ECTS": nenne EXAKT den Wert aus "Erreichte ECTS", zaehle nicht selbst.
    - Bei "Notendurchschnitt": nenne den Wert aus der ZUSAMMENFASSUNG.
-   - Bei "wie viele ECTS fehlen mir / was fehlt mir noch": Das Bachelorstudium Wirtschaftsinformatik
-     umfasst 180 ECTS. Rechne: 180 minus "Erreichte ECTS" = fehlende ECTS. Nenne NUR diese Zahl.
-     Verwende NIEMALS eine vom Nutzer behauptete ECTS-Zahl fuer diese Rechnung.
+   - Bei "wie viele ECTS fehlen mir / was fehlt mir noch" (Studium gesamt): Das Bachelorstudium
+     Wirtschaftsinformatik umfasst 180 ECTS. Rechne: 180 minus "Erreichte ECTS" = fehlende ECTS.
+     Nenne NUR diese Zahl. Verwende NIEMALS eine vom Nutzer behauptete ECTS-Zahl fuer diese Rechnung.
      Liste KEINE konkreten fehlenden Kurse auf, da du nicht sicher weisst welche das sind.
      Empfehle stattdessen, den Studienfortschritt in KUSSS zu pruefen.
+   - Bei "wie viele ECTS fehlen mir im (Pflicht)fach X" (X ist ein KONKRETES Fach):
+     1. Nimm die GESAMT-ECTS von X aus dem Curriculum-Eintrag, dessen "Bezeichnung" GENAU X ist
+        (z.B. "Data & Knowledge Engineering" -> 12 ECTS). Verwende dafuer NICHT die Teilfaecher
+        "Methoden und Konzepte des X" / "Anwendungen des X" (je 6) und NICHT einzelne LVAs (3).
+     2. Bestimme die im Fach bereits absolvierten ECTS: Summiere ALLE passenden absolvierten
+        Eintraege aus DEIN STUDIENERFOLG. Eine genannte Lehrveranstaltung besteht meist aus
+        mehreren Teilen (VL + UE) – zaehle diese ZUSAMMEN (z.B. "Datenmodellierung" VL 3 +
+        UE 3 = 6 ECTS). Eine einzelne VL oder UE allein ist NICHT der volle Wert.
+     3. Antworte mit: Gesamt-ECTS minus absolvierte ECTS = fehlende ECTS (z.B. 12 - 6 = 6).
+     Nenne sowohl die Gesamtzahl als auch die fehlende Zahl.
 
 9. Kalender / Stundenplan / Termine:
    - Wenn "KALENDER-EINTRAEGE" im Kontext stehen, beantworte Fragen nach Stundenplan,
