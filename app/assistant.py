@@ -365,6 +365,25 @@ def _is_duration_question(question: str) -> bool:
     return any(kw in q for kw in duration_keywords)
 
 
+def _is_summer_start_sequence_question(question: str) -> bool:
+    """
+    Erkennt Fragen nach dem empfohlenen Studienverlauf bei Studienbeginn im
+    SOMMERSEMESTER. Fuer diesen Fall existiert KEINE strukturierte, semesterweise
+    Empfehlung in den Daten (nur fuer Beginn im Wintersemester) – das PDF dazu ist
+    ein nicht-OCR-tes Bild. Ohne Guardrail adaptiert das Modell faelschlich die
+    Wintersemester-Liste und erfindet eine Antwort (Eval #19).
+    """
+    q = question.lower()
+    summer = any(k in q for k in [
+        "sommersemester", "im sommer angefangen", "im sommer begonnen", " im ss ",
+    ])
+    sequence = ("semester" in q) and any(k in q for k in [
+        "studienverlauf", "empfohlen", "empfehlen", "empfiehlst", "sollte ich",
+        "welche fächer", "welche kurse", "welche lvas", "welche lehrveranstaltungen",
+    ])
+    return summer and sequence
+
+
 def _extract_quoted_terms(question: str) -> list[str]:
     """
     Extrahiert in Anfuehrungszeichen gesetzte Begriffe (z.B. den Fachnamen in
@@ -432,6 +451,18 @@ def ask_assistant(
         grades_text = query_grades(user_id)
         if grades_text:
             context_parts.append(f"DEIN STUDIENERFOLG:\n{grades_text}")
+
+    # 1c. Guardrail Studienverlauf Sommersemester-Beginn: Dafuer fehlt die
+    #     strukturierte semesterweise Empfehlung (nur Wintersemester vorhanden).
+    #     Expliziter Hinweis verhindert, dass das Modell die WS-Liste als SS-Antwort
+    #     ausgibt oder eine Reihenfolge erfindet (Eval #19).
+    if _is_summer_start_sequence_question(question):
+        context_parts.append(
+            "HINWEIS STUDIENVERLAUF: Fuer den Studienbeginn im SOMMERSEMESTER liegt "
+            "KEINE strukturierte, semesterweise Empfehlung vor (nur fuer Beginn im "
+            "Wintersemester). Erfinde KEINE Faecherliste fuer den Sommersemester-Start "
+            "und gib NICHT die Wintersemester-Liste als Sommersemester-Empfehlung aus."
+        )
 
     # 2. Dynamische Steuerung der Ähnlichkeitssuche (Chunk-Menge steuern)
     #    Werte bewusst moderat, um unter dem Groq-TPM-Limit (6000) zu bleiben.
@@ -592,6 +623,11 @@ REGELN:
 
 7. Fehlende Informationen & Systemgrenzen:
    - Erfinde NIEMALS Kurse, ECTS-Werte oder Pruefungsmodalitaeten.
+   - Steht im Kontext "HINWEIS STUDIENVERLAUF: ... Sommersemester ... KEINE ...
+     Empfehlung": sage freundlich, dass fuer den Studienbeginn im Sommersemester keine
+     offizielle semesterweise Empfehlung vorliegt, und verweise auf Curriculum,
+     Studienhandbuch oder KUSSS. Gib KEINE erfundene und KEINE aus dem Wintersemester
+     uebernommene Faecherliste aus.
    - Wenn die Frage zum gewaehlten Studiengang passt, aber die Antwort nicht im Kontext steht:
      sage freundlich, dass dir diese konkrete Information nicht vorliegt, und empfiehl,
      im offiziellen Curriculum, im Studienhandbuch oder in KUSSS nachzusehen.
